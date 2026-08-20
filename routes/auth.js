@@ -339,7 +339,14 @@ router.get('/me', requireAuth, async (req, res) => {
     displayName: req.user.display_name,
     photoUrl: req.user.photo_url,
     role: req.user.role,
+    onboardingDone: req.user.onboarding_done,
   });
+});
+
+// ── POST /api/auth/onboarding-done ── помечает, что юзер прошёл приветственный онбординг
+router.post('/onboarding-done', requireAuth, async (req, res) => {
+  await pool.query('UPDATE users SET onboarding_done = TRUE WHERE id = $1', [req.user.id]);
+  res.json({ ok: true });
 });
 
 module.exports = router;
