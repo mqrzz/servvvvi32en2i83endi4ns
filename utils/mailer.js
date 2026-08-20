@@ -61,13 +61,15 @@ function button(text, url) {
 async function sendCodeEmail(toEmail, code, purpose) {
   const headings = {
     login: 'Код для входа',
-    register: 'Подтверждение регистрации',
+    register: 'Подтверждение email',
     delete_account: 'Подтверждение удаления аккаунта',
+    reset_password: 'Восстановление пароля',
   };
   const intros = {
     login: 'Кто-то (надеемся, что вы) пытается войти в аккаунт Antviz. Введите код ниже, чтобы продолжить:',
-    register: 'Почти готово! Введите код ниже, чтобы завершить регистрацию в Antviz:',
+    register: 'Почти готово! Введите код ниже, чтобы подтвердить email и завершить регистрацию в Antviz:',
     delete_account: 'Вы запросили удаление аккаунта Antviz. Это действие необратимо. Если это точно вы — введите код ниже:',
+    reset_password: 'Вы запросили восстановление пароля Antviz. Введите код ниже, чтобы задать новый пароль:',
   };
 
   const html = wrapEmail({
