@@ -349,4 +349,21 @@ router.post('/onboarding-done', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+// ── GET /api/auth/ban-status ── проверка бана текущего юзера (для maintenance.js)
+router.get('/ban-status', requireAuth, async (req, res) => {
+  const { rows } = await pool.query('SELECT * FROM bans WHERE user_id = $1', [req.user.id]);
+  if (rows.length === 0) return res.json({ banned: false });
+  const ban = rows[0];
+  const active = !ban.until || new Date(ban.until) > new Date();
+  if (!active) return res.json({ banned: false });
+  res.json({
+    banned: true,
+    reason: ban.reason,
+    until: ban.until,
+    showButton: ban.show_button,
+    btnLabel: ban.btn_label,
+    btnUrl: ban.btn_url,
+  });
+});
+
 module.exports = router;
