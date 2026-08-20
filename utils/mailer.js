@@ -1,40 +1,146 @@
 const nodemailer = require('nodemailer');
 
+const useAuth = Boolean(process.env.SMTP_USER && process.env.SMTP_PASS);
+
 const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: Number(process.env.SMTP_PORT || 465),
-  secure: Number(process.env.SMTP_PORT || 465) === 465,
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
+  host: process.env.SMTP_HOST || 'localhost',
+  port: Number(process.env.SMTP_PORT || 25),
+  secure: Number(process.env.SMTP_PORT || 25) === 465,
+  ...(useAuth
+    ? { auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } }
+    : {}),
 });
 
-async function sendCodeEmail(toEmail, code, purpose) {
-  const subjects = {
-    login: 'Код для входа в Antviz',
-    register: 'Код подтверждения регистрации Antviz',
-    delete_account: 'Код подтверждения удаления аккаунта Antviz',
-  };
-  const subject = subjects[purpose] || 'Код подтверждения Antviz';
+// ── Базовый каркас письма в фирменном стиле Antviz ──
+function wrapEmail({ heading, bodyHtml, footerNote }) {
+  return `
+  <div style="background:#f2f2f4; padding:32px 16px; font-family:'Geologica',Arial,Helvetica,sans-serif;">
+    <div style="max-width:480px; margin:0 auto;">
 
-  const html = `
-    <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
-      <h2 style="color:#111;">Antviz</h2>
-      <p style="font-size:16px; color:#333;">Ваш код подтверждения:</p>
-      <div style="font-size:32px; font-weight:700; letter-spacing:8px; background:#f3f3f3; padding:16px 24px; border-radius:12px; text-align:center; color:#111;">
-        ${code}
+      <div style="background:#111214; border-radius:28px; padding:32px 28px; text-align:center;">
+        <div style="color:#ffffff; font-size:20px; font-weight:700; letter-spacing:0.5px;">
+          antviz
+        </div>
       </div>
-      <p style="font-size:14px; color:#777; margin-top:16px;">Код действителен 10 минут. Если вы не запрашивали его — просто проигнорируйте это письмо.</p>
+
+      <div style="background:#ffffff; border-radius:28px; padding:32px 28px; margin-top:16px;">
+        <h1 style="margin:0 0 16px; font-size:22px; color:#111214; font-weight:700;">
+          ${heading}
+        </h1>
+        <div style="font-size:15px; line-height:1.6; color:#3a3a3e;">
+          ${bodyHtml}
+        </div>
+      </div>
+
+      <div style="text-align:center; margin-top:20px; font-size:12px; color:#9a9a9e; line-height:1.5;">
+        ${footerNote || 'Antviz &middot; antviz.ru'}
+      </div>
+
     </div>
-  `;
+  </div>`;
+}
+
+function codeBlock(code) {
+  return `
+    <div style="background:#f2f2f4; border-radius:20px; padding:18px 24px; text-align:center; margin:20px 0;">
+      <span style="font-size:32px; font-weight:700; letter-spacing:8px; color:#111214;">${code}</span>
+    </div>
+    <p style="font-size:13px; color:#9a9a9e;">Код действителен 10 минут. Если это были не вы — просто проигнорируйте письмо.</p>`;
+}
+
+function button(text, url) {
+  return `
+    <a href="${url}" style="display:inline-block; background:#1ede7b; color:#111214; text-decoration:none; font-weight:700; padding:14px 28px; border-radius:24px; font-size:15px; margin-top:8px;">
+      ${text}
+    </a>`;
+}
+
+async function sendCodeEmail(toEmail, code, purpose) {
+  const headings = {
+    login: 'Код для входа',
+    register: 'Подтверждение регистрации',
+    delete_account: 'Подтверждение удаления аккаунта',
+  };
+  const intros = {
+    login: 'Кто-то (надеемся, что вы) пытается войти в аккаунт Antviz. Введите код ниже, чтобы продолжить:',
+    register: 'Почти готово! Введите код ниже, чтобы завершить регистрацию в Antviz:',
+    delete_account: 'Вы запросили удаление аккаунта Antviz. Это действие необратимо. Если это точно вы — введите код ниже:',
+  };
+
+  const html = wrapEmail({
+    heading: headings[purpose] || 'Код подтверждения',
+    bodyHtml: `<p>${intros[purpose] || ''}</p>${codeBlock(code)}`,
+  });
 
   await transporter.sendMail({
     from: process.env.MAIL_FROM,
     to: toEmail,
-    subject,
+    subject: headings[purpose] || 'Код подтверждения Antviz',
     html,
   });
 }
 
-module.exports = { sendCodeEmail };
+async function sendNewDeviceLoginEmail(toEmail, { deviceName, ipAddress, time }) {
+  const html = wrapEmail({
+    heading: 'Новый вход в аккаунт',
+    bodyHtml: `
+      <p>Зафиксирован вход в ваш аккаунт Antviz с нового устройства:</p>
+      <div style="background:#f2f2f4; border-radius:20px; padding:16px 20px; margin:16px 0; font-size:14px; color:#3a3a3e;">
+        <div><b>Устройство:</b> ${deviceName || 'Неизвестно'}</div>
+        <div><b>IP-адрес:</b> ${ipAddress || 'Неизвестно'}</div>
+        <div><b>Время:</b> ${time}</div>
+      </div>
+      <p>Если это были не вы — зайдите в настройки аккаунта и завершите этот сеанс, либо смените вход.</p>
+      ${button('Открыть аккаунт', 'https://antviz.ru/profile/sessions')}
+    `,
+  });
+
+  await transporter.sendMail({
+    from: process.env.MAIL_FROM,
+    to: toEmail,
+    subject: 'Новый вход в аккаунт Antviz',
+    html,
+  });
+}
+
+async function sendAccountDeletedEmail(toEmail) {
+  const html = wrapEmail({
+    heading: 'Аккаунт удалён',
+    bodyHtml: `<p>Ваш аккаунт Antviz и связанные с ним личные данные были удалены. Если это была ошибка — свяжитесь с поддержкой в течение ближайшего времени.</p>`,
+  });
+
+  await transporter.sendMail({
+    from: process.env.MAIL_FROM,
+    to: toEmail,
+    subject: 'Аккаунт Antviz удалён',
+    html,
+  });
+}
+
+async function sendNewOrderEmail(toEmail, { orderId, packageName, totalPrice }) {
+  const html = wrapEmail({
+    heading: 'Заказ принят в работу',
+    bodyHtml: `
+      <p>Мы получили ваш заказ и уже приступаем к работе.</p>
+      <div style="background:#f2f2f4; border-radius:20px; padding:16px 20px; margin:16px 0; font-size:14px; color:#3a3a3e;">
+        <div><b>Тариф:</b> ${packageName}</div>
+        <div><b>Сумма:</b> ${totalPrice} ₽</div>
+      </div>
+      ${button('Открыть заказ', `https://antviz.ru/profile/orders?id=${orderId}`)}
+    `,
+  });
+
+  await transporter.sendMail({
+    from: process.env.MAIL_FROM,
+    to: toEmail,
+    subject: 'Ваш заказ принят — Antviz',
+    html,
+  });
+}
+
+module.exports = {
+  sendCodeEmail,
+  sendNewDeviceLoginEmail,
+  sendAccountDeletedEmail,
+  sendNewOrderEmail,
+};
