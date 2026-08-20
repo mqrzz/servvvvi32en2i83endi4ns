@@ -2,7 +2,7 @@ const express = require('express');
 const UAParser = require('ua-parser-js');
 const pool = require('../db/pool');
 const { generateCode, hashCode, verifyCode } = require('../utils/codes');
-const { sendCodeEmail } = require('../utils/mailer');
+const { sendCodeEmail, sendNewDeviceLoginEmail } = require('../utils/mailer');
 const { signSessionToken, hashToken, sessionExpiryDate, SESSION_DAYS } = require('../utils/tokens');
 const { sendCodeLimiter, verifyCodeLimiter } = require('../middleware/rateLimiters');
 const { requireAuth } = require('../middleware/requireAuth');
@@ -161,6 +161,16 @@ router.post('/verify-code', verifyCodeLimiter, async (req, res) => {
     await client.query('UPDATE sessions SET token_hash = $1 WHERE id = $2', [tokenHash, sessionId]);
 
     await client.query('COMMIT');
+
+    // Письмо о входе — только для 'login' (не для только что созданной регистрации,
+    // это было бы избыточно). Не блокируем ответ пользователю ожиданием отправки.
+    if (purpose === 'login') {
+      sendNewDeviceLoginEmail(user.email, {
+        deviceName,
+        ipAddress: req.ip,
+        time: new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }),
+      }).catch((e) => console.error('Не удалось отправить письмо о входе:', e));
+    }
 
     res.cookie('session', token, {
       httpOnly: true,
