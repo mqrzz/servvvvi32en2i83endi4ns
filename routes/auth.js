@@ -340,6 +340,7 @@ router.get('/me', requireAuth, async (req, res) => {
     photoUrl: req.user.photo_url,
     role: req.user.role,
     onboardingDone: req.user.onboarding_done,
+    createdAt: req.user.created_at,
   });
 });
 
