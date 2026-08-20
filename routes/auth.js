@@ -3,7 +3,7 @@ const bcrypt = require('bcryptjs');
 const UAParser = require('ua-parser-js');
 const pool = require('../db/pool');
 const { generateCode, hashCode, verifyCode } = require('../utils/codes');
-const { sendCodeEmail, sendNewDeviceLoginEmail } = require('../utils/mailer');
+const { sendCodeEmail, sendNewDeviceLoginEmail, sendAccountDeletedEmail } = require('../utils/mailer');
 const { signSessionToken, hashToken, sessionExpiryDate, SESSION_DAYS } = require('../utils/tokens');
 const { sendCodeLimiter, verifyCodeLimiter } = require('../middleware/rateLimiters');
 const { requireAuth } = require('../middleware/requireAuth');
@@ -364,6 +364,77 @@ router.get('/ban-status', requireAuth, async (req, res) => {
     btnLabel: ban.btn_label,
     btnUrl: ban.btn_url,
   });
+});
+
+// ── PUT /api/auth/profile ── обновить отображаемое имя
+router.put('/profile', requireAuth, async (req, res) => {
+  const { displayName } = req.body;
+  if (!displayName || !displayName.trim()) {
+    return res.status(400).json({ error: 'Введите имя' });
+  }
+  await pool.query('UPDATE users SET display_name = $1 WHERE id = $2', [displayName.trim(), req.user.id]);
+  res.json({ ok: true, displayName: displayName.trim() });
+});
+
+// ── POST /api/auth/change-password ── смена пароля через текущий пароль (юзер уже залогинен)
+router.post('/change-password', requireAuth, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Заполните оба поля' });
+    if (newPassword.length < 6) return res.status(400).json({ error: 'Новый пароль должен быть не короче 6 символов' });
+
+    const { rows } = await pool.query('SELECT password_hash FROM users WHERE id = $1', [req.user.id]);
+    const ok = await bcrypt.compare(currentPassword, rows[0].password_hash);
+    if (!ok) return res.status(401).json({ error: 'Текущий пароль неверен' });
+
+    const newHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+    await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [newHash, req.user.id]);
+
+    // Разлогиниваем остальные устройства из соображений безопасности, текущее оставляем
+    await pool.query(
+      'UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND id != $2 AND revoked_at IS NULL',
+      [req.user.id, req.user.session_id]
+    );
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('change-password error:', err);
+    res.status(500).json({ error: 'Не удалось сменить пароль' });
+  }
+});
+
+// ── POST /api/auth/delete-account ── окончательное удаление аккаунта по коду
+router.post('/delete-account', verifyCodeLimiter, requireAuth, async (req, res) => {
+  try {
+    const { code } = req.body;
+    if (!code) return res.status(400).json({ error: 'Введите код' });
+
+    const { rows: codeRows } = await pool.query(
+      `SELECT * FROM auth_codes WHERE email = $1 AND purpose = 'delete_account' AND used_at IS NULL
+       ORDER BY created_at DESC LIMIT 1`,
+      [req.user.email]
+    );
+    if (codeRows.length === 0) return res.status(400).json({ error: 'Код не найден, запросите новый' });
+    const authCode = codeRows[0];
+    if (new Date(authCode.expires_at) < new Date()) return res.status(400).json({ error: 'Код истёк, запросите новый' });
+    if (authCode.attempts >= authCode.max_attempts) return res.status(400).json({ error: 'Превышено число попыток, запросите новый код' });
+    if (!verifyCode(code.trim(), authCode.code_hash)) {
+      await pool.query('UPDATE auth_codes SET attempts = attempts + 1 WHERE id = $1', [authCode.id]);
+      return res.status(400).json({ error: 'Неверный код' });
+    }
+    await pool.query('UPDATE auth_codes SET used_at = now() WHERE id = $1', [authCode.id]);
+
+    // ON DELETE CASCADE в схеме удалит связанные sessions/bans автоматически
+    await pool.query('DELETE FROM users WHERE id = $1', [req.user.id]);
+
+    sendAccountDeletedEmail(req.user.email).catch((e) => console.error('Не удалось отправить письмо об удалении:', e));
+
+    res.clearCookie('session', { domain: '.antviz.ru' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('delete-account error:', err);
+    res.status(500).json({ error: 'Не удалось удалить аккаунт' });
+  }
 });
 
 module.exports = router;
