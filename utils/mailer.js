@@ -6,6 +6,9 @@ const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || 'localhost',
   port: Number(process.env.SMTP_PORT || 25),
   secure: Number(process.env.SMTP_PORT || 25) === 465,
+  // Локальный Postfix использует самоподписанный сертификат — это ок,
+  // соединение не покидает сервер (Node.js стучится в Postfix на этом же хосте).
+  tls: { rejectUnauthorized: false },
   ...(useAuth
     ? { auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } }
     : {}),
