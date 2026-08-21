@@ -9,6 +9,8 @@ const authRoutes = require('./routes/auth');
 const sessionsRoutes = require('./routes/sessions');
 const ordersRoutes = require('./routes/orders');
 const notificationsRoutes = require('./routes/notifications');
+const ticketsRoutes = require('./routes/tickets');
+const serviceTicketsRoutes = require('./routes/service-tickets');
 
 const app = express();
 
@@ -43,6 +45,8 @@ app.use('/api/auth', authRoutes);
 app.use('/api/sessions', sessionsRoutes);
 app.use('/api/orders', ordersRoutes);
 app.use('/api/notifications', notificationsRoutes);
+app.use('/api/tickets', ticketsRoutes);
+app.use('/api/service-tickets', serviceTicketsRoutes);
 
 // Единый обработчик ошибок — чтобы стектрейсы не улетали на фронт
 app.use((err, req, res, next) => {
