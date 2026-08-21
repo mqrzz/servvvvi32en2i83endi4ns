@@ -25,7 +25,11 @@ function toClientOrder(o) {
     referencesText: o.references_text,
     launchDate: o.launch_date,
     shopDetails: o.shop_details,
+    attachments: o.attachments,
+    favicon: o.favicon_data,
     paymentType: o.payment_type,
+    paidAmount: o.paid_amount ? Number(o.paid_amount) : 0,
+    remainingAmount: o.remaining_amount ? Number(o.remaining_amount) : 0,
     status: o.status,
     revisionRequested: o.revision_requested,
     reviewed: o.reviewed,
@@ -67,8 +71,7 @@ router.get('/:id', requireAuth, async (req, res) => {
   res.json(toClientOrder(order));
 });
 
-// ── POST /api/orders ── создать заказ (сама форма заказа переедет отдельным этапом,
-// этот эндпоинт уже готов принять данные в правильном формате)
+// ── POST /api/orders ── создать заказ (черновик, status=-1 до оплаты)
 router.post('/', requireAuth, async (req, res) => {
   try {
     const b = req.body;
@@ -77,8 +80,8 @@ router.post('/', requireAuth, async (req, res) => {
         user_id, client_name, client_email, package, site_type, site_format, pages,
         total_price, extras, domain_option, domain_name, promo_code, discount_applied,
         description, goals, content_readiness, references_text, launch_date,
-        shop_details, payment_type, status
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+        shop_details, attachments, favicon_data, payment_type, paid_amount, remaining_amount, status
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
       RETURNING *`,
       [
         req.user.id, req.user.display_name, req.user.email,
@@ -87,7 +90,8 @@ router.post('/', requireAuth, async (req, res) => {
         b.promoCode || null, b.discountApplied || 0,
         b.description || null, JSON.stringify(b.goals || null), b.contentReadiness || null,
         b.referencesText || null, b.launchDate || null,
-        JSON.stringify(b.shopDetails || null), b.paymentType || null, -1, // -1 = черновик до оплаты
+        JSON.stringify(b.shopDetails || null), JSON.stringify(b.attachments || null), b.favicon || null,
+        b.paymentType || null, b.paidAmount || 0, b.remainingAmount || 0, -1, // -1 = черновик до оплаты
       ]
     );
     const order = rows[0];
@@ -96,6 +100,26 @@ router.post('/', requireAuth, async (req, res) => {
     console.error('create order error:', err);
     res.status(500).json({ error: 'Не удалось создать заказ' });
   }
+});
+
+// ── POST /api/orders/cleanup-drafts ── удалить свои зависшие черновики
+// (status=-1, старше 10 минут) — чтобы неоплаченные попытки не копились
+router.post('/cleanup-drafts', requireAuth, async (req, res) => {
+  await pool.query(
+    `DELETE FROM orders WHERE user_id = $1 AND status = -1 AND created_at < now() - interval '10 minutes'`,
+    [req.user.id]
+  );
+  res.json({ ok: true });
+});
+
+// ── DELETE /api/orders/:id ── удалить свой черновик (только status=-1, например если оплата не запустилась)
+router.delete('/:id', requireAuth, async (req, res) => {
+  const { rows } = await pool.query(
+    `DELETE FROM orders WHERE id = $1 AND user_id = $2 AND status = -1 RETURNING id`,
+    [req.params.id, req.user.id]
+  );
+  if (rows.length === 0) return res.status(404).json({ error: 'Черновик не найден' });
+  res.json({ ok: true });
 });
 
 // ── PATCH /api/orders/:id/status ── смена статуса (только админ)
