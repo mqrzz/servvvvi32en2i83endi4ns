@@ -10,6 +10,11 @@ const sessionsRoutes = require('./routes/sessions');
 
 const app = express();
 
+// Сервер стоит за nginx (reverse proxy), поэтому нужно доверять
+// заголовку X-Forwarded-For, чтобы req.ip и express-rate-limit
+// корректно определяли реальный IP клиента, а не падали с ошибкой.
+app.set('trust proxy', 1);
+
 app.use(express.json({ limit: '2mb' }));
 app.use(cookieParser());
 app.use(
