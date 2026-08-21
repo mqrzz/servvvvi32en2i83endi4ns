@@ -7,6 +7,8 @@ const path = require('path');
 
 const authRoutes = require('./routes/auth');
 const sessionsRoutes = require('./routes/sessions');
+const ordersRoutes = require('./routes/orders');
+const notificationsRoutes = require('./routes/notifications');
 
 const app = express();
 
@@ -39,6 +41,8 @@ app.get('/api/maintenance-status', (req, res) => {
 
 app.use('/api/auth', authRoutes);
 app.use('/api/sessions', sessionsRoutes);
+app.use('/api/orders', ordersRoutes);
+app.use('/api/notifications', notificationsRoutes);
 
 // Единый обработчик ошибок — чтобы стектрейсы не улетали на фронт
 app.use((err, req, res, next) => {
