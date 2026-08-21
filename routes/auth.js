@@ -1,5 +1,6 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
+const disposableDomains = require('disposable-email-domains');
 const UAParser = require('ua-parser-js');
 const pool = require('../db/pool');
 const { generateCode, hashCode, verifyCode } = require('../utils/codes');
@@ -12,6 +13,12 @@ const router = express.Router();
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const BCRYPT_ROUNDS = 12;
+const disposableSet = new Set(disposableDomains);
+
+function isDisposableEmail(email) {
+  const domain = email.split('@')[1]?.toLowerCase();
+  return domain ? disposableSet.has(domain) : false;
+}
 
 function deviceNameFromUA(uaString) {
   const parser = new UAParser(uaString || '');
@@ -61,6 +68,9 @@ router.post('/register', sendCodeLimiter, async (req, res) => {
     const { name, email, password } = req.body;
     if (!email || !EMAIL_RE.test(email)) {
       return res.status(400).json({ error: 'Некорректный email' });
+    }
+    if (isDisposableEmail(email)) {
+      return res.status(400).json({ error: 'Временные (одноразовые) email не поддерживаются, укажите постоянный адрес' });
     }
     if (!password || password.length < 6) {
       return res.status(400).json({ error: 'Пароль должен быть не короче 6 символов' });
@@ -226,19 +236,20 @@ router.post('/forgot-password', sendCodeLimiter, async (req, res) => {
     const normalizedEmail = email.trim().toLowerCase();
 
     const { rows } = await pool.query('SELECT id FROM users WHERE email = $1 AND email_verified = TRUE', [normalizedEmail]);
-    // Намеренно не разглашаем, существует ли аккаунт — единый ответ в любом случае
-    if (rows.length > 0) {
-      const code = generateCode();
-      const codeHash = hashCode(code);
-      const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-      await pool.query(
-        `INSERT INTO auth_codes (email, code_hash, purpose, expires_at, ip_address) VALUES ($1, $2, 'reset_password', $3, $4)`,
-        [normalizedEmail, codeHash, expiresAt, req.ip]
-      );
-      await sendCodeEmail(normalizedEmail, code, 'reset_password');
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Аккаунт с таким email не найден' });
     }
 
-    res.json({ ok: true, message: 'Если такой аккаунт есть — код отправлен на почту' });
+    const code = generateCode();
+    const codeHash = hashCode(code);
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    await pool.query(
+      `INSERT INTO auth_codes (email, code_hash, purpose, expires_at, ip_address) VALUES ($1, $2, 'reset_password', $3, $4)`,
+      [normalizedEmail, codeHash, expiresAt, req.ip]
+    );
+    await sendCodeEmail(normalizedEmail, code, 'reset_password');
+
+    res.json({ ok: true, message: 'Код отправлен на почту' });
   } catch (err) {
     console.error('forgot-password error:', err);
     res.status(500).json({ error: 'Не удалось отправить код' });
