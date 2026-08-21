@@ -11,6 +11,7 @@ const ordersRoutes = require('./routes/orders');
 const notificationsRoutes = require('./routes/notifications');
 const ticketsRoutes = require('./routes/tickets');
 const serviceTicketsRoutes = require('./routes/service-tickets');
+const promoCodesRoutes = require('./routes/promo-codes');
 
 const app = express();
 
@@ -47,6 +48,7 @@ app.use('/api/orders', ordersRoutes);
 app.use('/api/notifications', notificationsRoutes);
 app.use('/api/tickets', ticketsRoutes);
 app.use('/api/service-tickets', serviceTicketsRoutes);
+app.use('/api/promo-codes', promoCodesRoutes);
 
 // Единый обработчик ошибок — чтобы стектрейсы не улетали на фронт
 app.use((err, req, res, next) => {
