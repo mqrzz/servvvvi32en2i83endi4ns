@@ -12,6 +12,8 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE TABLE users (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(), -- аналог uid
     email           TEXT UNIQUE NOT NULL,
+    password_hash   TEXT NOT NULL,                  -- bcrypt-хэш, пароль никогда не хранится открыто
+    email_verified  BOOLEAN NOT NULL DEFAULT FALSE,  -- подтверждён ли email кодом при регистрации
     display_name    TEXT NOT NULL DEFAULT 'Пользователь',
     photo_url       TEXT,
     role            TEXT NOT NULL DEFAULT 'user', -- 'user' | 'admin'
@@ -100,6 +102,8 @@ CREATE TABLE orders (
     favicon_data           TEXT,
 
     payment_type          TEXT,                -- YooKassa/Robokassa и т.д.
+    paid_amount            NUMERIC(10,2) NOT NULL DEFAULT 0,
+    remaining_amount        NUMERIC(10,2) NOT NULL DEFAULT 0, -- для частичной оплаты (50%)
     status                 SMALLINT NOT NULL DEFAULT -1, -- как в исходнике: -1 = ждёт оплаты и т.д.
     revision_requested      BOOLEAN NOT NULL DEFAULT FALSE,
     reviewed                BOOLEAN NOT NULL DEFAULT FALSE,
@@ -169,7 +173,7 @@ CREATE TABLE service_tickets (
     billing         TEXT, -- 'subscription' и т.д.
     admin_reply     TEXT,
     status          TEXT NOT NULL DEFAULT 'open', -- 'open' | 'done'
-    rating          SMALLINT,
+    rating          TEXT, -- 'up' | 'down', выставляется юзером после завершения
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
