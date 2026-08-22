@@ -13,6 +13,7 @@ function toClient(r) {
     text: r.text,
     clientName: r.client_name,
     clientEmail: r.client_email,
+    hidden: r.hidden,
     createdAt: r.created_at,
   };
 }
@@ -48,6 +49,14 @@ router.post('/', requireAuth, async (req, res) => {
     console.error('create review error:', err);
     res.status(500).json({ error: 'Не удалось отправить отзыв' });
   }
+});
+
+// ── PATCH /api/reviews/:id ── показать/скрыть отзыв (только админ)
+router.patch('/:id', requireAdmin, async (req, res) => {
+  const { hidden } = req.body;
+  const { rows } = await pool.query('UPDATE reviews SET hidden = $1 WHERE id = $2 RETURNING *', [!!hidden, req.params.id]);
+  if (rows.length === 0) return res.status(404).json({ error: 'Отзыв не найден' });
+  res.json(toClient(rows[0]));
 });
 
 // ── DELETE /api/reviews/:id ── удалить отзыв (только админ)
