@@ -1,6 +1,6 @@
 const express = require('express');
 const pool = require('../db/pool');
-const { requireAuth } = require('../middleware/requireAuth');
+const { requireAuth, requireAdmin } = require('../middleware/requireAuth');
 
 const router = express.Router();
 
@@ -37,6 +37,36 @@ router.patch('/:id/read', requireAuth, async (req, res) => {
 router.patch('/read-all', requireAuth, async (req, res) => {
   await pool.query('UPDATE notifications SET is_read = TRUE WHERE user_id = $1 AND is_read = FALSE', [req.user.id]);
   res.json({ ok: true });
+});
+
+// ── POST /api/notifications/broadcast ── рассылка (только админ)
+// target: 'all' | конкретный user_id
+router.post('/broadcast', requireAdmin, async (req, res) => {
+  try {
+    const { target, title, text } = req.body;
+    if (!title || !text) return res.status(400).json({ error: 'Заполните тему и текст' });
+
+    let userIds;
+    if (target === 'all') {
+      const { rows } = await pool.query('SELECT id FROM users');
+      userIds = rows.map(r => r.id);
+    } else {
+      const { rows } = await pool.query('SELECT id FROM users WHERE id = $1', [target]);
+      if (rows.length === 0) return res.status(404).json({ error: 'Пользователь не найден' });
+      userIds = [target];
+    }
+
+    if (!userIds.length) return res.status(400).json({ error: 'Нет получателей' });
+
+    const values = userIds.map((_, i) => `($${i * 3 + 1}, $${i * 3 + 2}, $${i * 3 + 3})`).join(',');
+    const params = userIds.flatMap(id => [id, title, text]);
+    await pool.query(`INSERT INTO notifications (user_id, title, text) VALUES ${values}`, params);
+
+    res.json({ ok: true, sent: userIds.length });
+  } catch (err) {
+    console.error('broadcast error:', err);
+    res.status(500).json({ error: 'Не удалось разослать уведомление' });
+  }
 });
 
 module.exports = router;
