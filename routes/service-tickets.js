@@ -101,4 +101,11 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   res.json(toClient(rows[0]));
 });
 
+// ── DELETE /api/service-tickets/:id ── удалить заявку (только админ)
+router.delete('/:id', requireAdmin, async (req, res) => {
+  const { rows } = await pool.query('DELETE FROM service_tickets WHERE id = $1 RETURNING id', [req.params.id]);
+  if (rows.length === 0) return res.status(404).json({ error: 'Заявка не найдена' });
+  res.json({ ok: true });
+});
+
 module.exports = router;
