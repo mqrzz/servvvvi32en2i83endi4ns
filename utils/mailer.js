@@ -42,6 +42,10 @@ function imageAttachment(filename) {
     filename,
     path: path.join(IMG_DIR, filename),
     cid: cidFor(filename),
+    // Без явного contentDisposition nodemailer по умолчанию ставит "attachment",
+    // даже если задан cid — из-за этого Gmail показывает картинку как вложение.
+    // "inline" убирает её из списка приложений, оставляя только встраивание в HTML.
+    contentDisposition: 'inline',
   };
 }
 
