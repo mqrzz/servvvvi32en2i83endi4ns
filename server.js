@@ -4,6 +4,7 @@ const cookieParser = require('cookie-parser');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+const { requireAdmin } = require('./middleware/requireAuth');
 
 const authRoutes = require('./routes/auth');
 const sessionsRoutes = require('./routes/sessions');
@@ -12,6 +13,9 @@ const notificationsRoutes = require('./routes/notifications');
 const ticketsRoutes = require('./routes/tickets');
 const serviceTicketsRoutes = require('./routes/service-tickets');
 const promoCodesRoutes = require('./routes/promo-codes');
+const bansRoutes = require('./routes/bans');
+const reviewsRoutes = require('./routes/reviews');
+const usersRoutes = require('./routes/users');
 
 const app = express();
 
@@ -42,6 +46,17 @@ app.get('/api/maintenance-status', (req, res) => {
   res.json({ enabled });
 });
 
+// Переключение тех.работ прямо из админки (без необходимости заходить по SSH)
+app.post('/api/maintenance-toggle', requireAdmin, (req, res) => {
+  const enabled = fs.existsSync(MAINTENANCE_FLAG_PATH);
+  if (enabled) {
+    fs.unlinkSync(MAINTENANCE_FLAG_PATH);
+  } else {
+    fs.writeFileSync(MAINTENANCE_FLAG_PATH, '');
+  }
+  res.json({ enabled: !enabled });
+});
+
 app.use('/api/auth', authRoutes);
 app.use('/api/sessions', sessionsRoutes);
 app.use('/api/orders', ordersRoutes);
@@ -49,6 +64,9 @@ app.use('/api/notifications', notificationsRoutes);
 app.use('/api/tickets', ticketsRoutes);
 app.use('/api/service-tickets', serviceTicketsRoutes);
 app.use('/api/promo-codes', promoCodesRoutes);
+app.use('/api/bans', bansRoutes);
+app.use('/api/reviews', reviewsRoutes);
+app.use('/api/users', usersRoutes);
 
 // Единый обработчик ошибок — чтобы стектрейсы не улетали на фронт
 app.use((err, req, res, next) => {
