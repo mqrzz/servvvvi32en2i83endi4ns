@@ -63,7 +63,7 @@ function socialRow() {
           </a>
         </td>`
   ).join('');
-  return `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto;"><tr>${cells}</tr></table>`;
+  return `<table role="presentation" align="center" cellpadding="0" cellspacing="0" style="margin:0 auto;"><tr>${cells}</tr></table>`;
 }
 
 // ── Базовый каркас письма в фирменном стиле Antviz ──
@@ -155,7 +155,7 @@ async function sendNewDeviceLoginEmail(toEmail, { deviceName, ipAddress, time })
         <div><b>Время:</b> ${time}</div>
       </div>
       <p>Если это были не вы — зайдите в настройки аккаунта и завершите этот сеанс, либо смените вход.</p>
-      ${button('Открыть аккаунт', 'https://antviz.ru/profile/sessions')}
+      ${button('Открыть аккаунт', 'https://antviz.ru/profile/settings')}
     `,
   });
 
