@@ -7,6 +7,7 @@ const router = express.Router();
 function toClientTicket(t) {
   return {
     id: t.id,
+    uid: t.user_id,
     userName: t.user_name,
     userEmail: t.user_email,
     topic: t.topic,
@@ -16,6 +17,7 @@ function toClientTicket(t) {
     orderLabel: t.order_label,
     status: t.status,
     read: t.is_read,
+    adminRead: t.admin_read,
     createdAt: t.created_at,
     updatedAt: t.updated_at,
   };
@@ -118,13 +120,21 @@ router.post('/:id/messages', requireAuth, async (req, res) => {
     [req.params.id, sender, text || null, imageUrl || null]
   );
 
-  // Обновляем тикет: время + статус (переоткрываем, если юзер написал в закрытый),
-  // и is_read — если пишет юзер, для админки это "новое сообщение" (is_read=false);
-  // если пишет админ, юзер увидит непрочитанное в своём интерфейсе отдельно.
-  await pool.query(
-    `UPDATE tickets SET updated_at = now(), status = 'open', is_read = $1 WHERE id = $2`,
-    [sender === 'admin', req.params.id]
-  );
+  // Обновляем тикет: время + статус (переоткрываем, если юзер написал в закрытый).
+  // is_read = увидел ли КЛИЕНТ последний ответ, admin_read = увидел ли АДМИН
+  // последнее сообщение — это два независимых флага, каждый смотрит на
+  // "чужую" сторону переписки.
+  if (sender === 'admin') {
+    await pool.query(
+      `UPDATE tickets SET updated_at = now(), status = 'open', is_read = FALSE, admin_read = TRUE WHERE id = $1`,
+      [req.params.id]
+    );
+  } else {
+    await pool.query(
+      `UPDATE tickets SET updated_at = now(), status = 'open', is_read = TRUE, admin_read = FALSE WHERE id = $1`,
+      [req.params.id]
+    );
+  }
 
   res.json(toClientMessage(rows[0]));
 });
@@ -137,6 +147,53 @@ router.patch('/:id/read', requireAuth, async (req, res) => {
   );
   if (rows.length === 0) return res.status(404).json({ error: 'Обращение не найдено' });
   res.json({ ok: true });
+});
+
+// ── PATCH /api/tickets/:id/admin-read ── отметить прочитанным админом
+router.patch('/:id/admin-read', requireAdmin, async (req, res) => {
+  const { rows } = await pool.query('UPDATE tickets SET admin_read = TRUE WHERE id = $1 RETURNING id', [req.params.id]);
+  if (rows.length === 0) return res.status(404).json({ error: 'Обращение не найдено' });
+  res.json({ ok: true });
+});
+
+// ── DELETE /api/tickets/:id ── удалить обращение целиком (только админ)
+router.delete('/:id', requireAdmin, async (req, res) => {
+  const { rows } = await pool.query('DELETE FROM tickets WHERE id = $1 RETURNING id', [req.params.id]);
+  if (rows.length === 0) return res.status(404).json({ error: 'Обращение не найдено' });
+  res.json({ ok: true });
+});
+
+// ── POST /api/tickets/admin/create ── создать тикет от лица админа (для конкретного юзера)
+router.post('/admin/create', requireAdmin, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { userId, topic, subject, message, priority } = req.body;
+    if (!userId || !subject || !message) return res.status(400).json({ error: 'Заполните обязательные поля' });
+
+    const { rows: userRows } = await client.query('SELECT display_name, email FROM users WHERE id = $1', [userId]);
+    if (userRows.length === 0) return res.status(404).json({ error: 'Пользователь не найден' });
+    const targetUser = userRows[0];
+
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `INSERT INTO tickets (user_id, user_name, user_email, topic, priority, subject, is_read, admin_read)
+       VALUES ($1,$2,$3,$4,$5,$6,FALSE,TRUE) RETURNING *`,
+      [userId, targetUser.display_name, targetUser.email, topic || 'Общий вопрос', priority || 'medium', subject]
+    );
+    const ticket = rows[0];
+    await client.query(
+      `INSERT INTO ticket_messages (ticket_id, sender, text) VALUES ($1, 'admin', $2)`,
+      [ticket.id, message]
+    );
+    await client.query('COMMIT');
+    res.json(toClientTicket(ticket));
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('admin create ticket error:', err);
+    res.status(500).json({ error: 'Не удалось создать тикет' });
+  } finally {
+    client.release();
+  }
 });
 
 // ── PATCH /api/tickets/:id/status ── смена статуса (только админ)
