@@ -9,6 +9,7 @@ const router = express.Router();
 function toClientOrder(o) {
   return {
     id: o.id,
+    uid: o.user_id,
     package: o.package,
     siteType: o.site_type,
     siteFormat: o.site_format,
@@ -35,7 +36,29 @@ function toClientOrder(o) {
     reviewed: o.reviewed,
     siteUrl: o.site_url,
     siteDomain: o.site_domain,
+    siteFaviconUrl: o.site_favicon_url,
+    sitePages: o.site_pages,
+    siteRepo: o.site_repo,
+    botUsername: o.bot_username,
+    botLink: o.bot_link,
     tariff: o.tariff,
+    statusComment: o.status_comment,
+    startedAt: o.started_at,
+    doneAt: o.done_at,
+    archived: o.archived,
+    paid: o.paid,
+    paidAt: o.paid_at,
+    refundStatus: o.refund_status,
+    refundAmount: o.refund_amount ? Number(o.refund_amount) : null,
+    refundComment: o.refund_comment,
+    refundRequestedAt: o.refund_requested_at,
+    refundDecidedAt: o.refund_decided_at,
+    refundedAt: o.refunded_at,
+    supportActive: o.support_active,
+    supportRequested: o.support_requested,
+    supportTariff: o.support_tariff,
+    supportStartedAt: o.support_started_at,
+    supportExpiresAt: o.support_expires_at,
     createdAt: o.created_at,
     updatedAt: o.updated_at,
     clientName: o.client_name,
@@ -120,6 +143,53 @@ router.delete('/:id', requireAuth, async (req, res) => {
   );
   if (rows.length === 0) return res.status(404).json({ error: 'Черновик не найден' });
   res.json({ ok: true });
+});
+
+// ── PATCH /api/orders/:id ── гибкое обновление любых полей (только админ) —
+// используется админкой для статус-комментариев, дат, доставки сайта,
+// возвратов, обслуживания и т.д. Белый список полей защищает от
+// произвольной записи в колонки, которых нет в этом списке.
+const ADMIN_PATCHABLE_FIELDS = {
+  siteUrl: 'site_url', siteDomain: 'site_domain', siteFaviconUrl: 'site_favicon_url',
+  sitePages: 'site_pages', siteRepo: 'site_repo', botUsername: 'bot_username', botLink: 'bot_link',
+  tariff: 'tariff', statusComment: 'status_comment', startedAt: 'started_at', doneAt: 'done_at',
+  archived: 'archived', paid: 'paid', paidAt: 'paid_at', status: 'status',
+  revisionRequested: 'revision_requested', reviewed: 'reviewed',
+  refundStatus: 'refund_status', refundAmount: 'refund_amount', refundComment: 'refund_comment',
+  refundRequestedAt: 'refund_requested_at', refundDecidedAt: 'refund_decided_at', refundedAt: 'refunded_at',
+  supportActive: 'support_active', supportRequested: 'support_requested', supportTariff: 'support_tariff',
+  supportStartedAt: 'support_started_at', supportExpiresAt: 'support_expires_at',
+};
+
+router.patch('/:id', requireAdmin, async (req, res) => {
+  const sets = [];
+  const values = [];
+  let i = 1;
+  for (const [key, column] of Object.entries(ADMIN_PATCHABLE_FIELDS)) {
+    if (Object.prototype.hasOwnProperty.call(req.body, key)) {
+      sets.push(`${column} = $${i++}`);
+      values.push(req.body[key]);
+    }
+  }
+  if (!sets.length) return res.status(400).json({ error: 'Нечего обновлять' });
+  values.push(req.params.id);
+
+  try {
+    const { rows } = await pool.query(`UPDATE orders SET ${sets.join(', ')} WHERE id = $${i} RETURNING *`, values);
+    if (rows.length === 0) return res.status(404).json({ error: 'Заказ не найден' });
+    const order = rows[0];
+
+    if (Object.prototype.hasOwnProperty.call(req.body, 'status') && req.body.status === 0) {
+      sendNewOrderEmail(order.client_email, {
+        orderId: order.id, packageName: order.package, totalPrice: order.total_price,
+      }).catch((e) => console.error('Не удалось отправить письмо о заказе:', e));
+    }
+
+    res.json(toClientOrder(order));
+  } catch (err) {
+    console.error('admin patch order error:', err);
+    res.status(500).json({ error: 'Не удалось обновить заказ' });
+  }
 });
 
 // ── PATCH /api/orders/:id/status ── смена статуса (только админ)
