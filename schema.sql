@@ -238,6 +238,7 @@ CREATE TABLE reviews (
     text        TEXT,
     client_name TEXT,
     client_email TEXT,
+    hidden      BOOLEAN NOT NULL DEFAULT FALSE, -- модерация: скрыт с публичной страницы отзывов
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
