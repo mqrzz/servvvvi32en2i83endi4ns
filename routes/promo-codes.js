@@ -69,4 +69,11 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   res.json(toClient(rows[0]));
 });
 
+// ── DELETE /api/promo-codes/:id ── удалить (только админ)
+router.delete('/:id', requireAdmin, async (req, res) => {
+  const { rows } = await pool.query('DELETE FROM promo_codes WHERE id = $1 RETURNING id', [req.params.id]);
+  if (rows.length === 0) return res.status(404).json({ error: 'Промокод не найден' });
+  res.json({ ok: true });
+});
+
 module.exports = router;
