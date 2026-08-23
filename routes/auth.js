@@ -5,7 +5,7 @@ const UAParser = require('ua-parser-js');
 const pool = require('../db/pool');
 const { generateCode, hashCode, verifyCode } = require('../utils/codes');
 const { sendCodeEmail, sendNewDeviceLoginEmail, sendAccountDeletedEmail } = require('../utils/mailer');
-const { signSessionToken, hashToken, sessionExpiryDate, SESSION_DAYS } = require('../utils/tokens');
+const { signSessionToken, hashToken, sessionExpiryDate, SESSION_DAYS, signServiceToken } = require('../utils/tokens');
 const { sendCodeLimiter, verifyCodeLimiter } = require('../middleware/rateLimiters');
 const { requireAuth } = require('../middleware/requireAuth');
 
@@ -447,6 +447,15 @@ router.post('/delete-account', verifyCodeLimiter, requireAuth, async (req, res) 
     console.error('delete-account error:', err);
     res.status(500).json({ error: 'Не удалось удалить аккаунт' });
   }
+});
+
+// ── POST /api/auth/service-token ── короткоживущий (5 мин) токен для
+// доверенных сторонних сервисов, действующих от лица юзера (сейчас — Vercel
+// payment-функции: браузер получает этот токен и передаёт его в заголовке
+// Authorization при вызове оплаты, минуя cookie, которая не долетает
+// до другого домена).
+router.post('/service-token', requireAuth, async (req, res) => {
+  res.json({ token: signServiceToken(req.user.id) });
 });
 
 module.exports = router;
