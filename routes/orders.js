@@ -1,6 +1,6 @@
 const express = require('express');
 const pool = require('../db/pool');
-const { requireAuth, requireAdmin } = require('../middleware/requireAuth');
+const { requireAuth, requireAdmin, requireUserOrService } = require('../middleware/requireAuth');
 const { sendNewOrderEmail } = require('../utils/mailer');
 
 const router = express.Router();
@@ -48,6 +48,8 @@ function toClientOrder(o) {
     archived: o.archived,
     paid: o.paid,
     paidAt: o.paid_at,
+    lastPaymentAt: o.last_payment_at,
+    outSum: o.out_sum ? Number(o.out_sum) : null,
     refundStatus: o.refund_status,
     refundAmount: o.refund_amount ? Number(o.refund_amount) : null,
     refundComment: o.refund_comment,
@@ -84,7 +86,7 @@ router.get('/admin/all', requireAdmin, async (req, res) => {
 });
 
 // ── GET /api/orders/:id ── один заказ (владелец или админ)
-router.get('/:id', requireAuth, async (req, res) => {
+router.get('/:id', requireUserOrService, async (req, res) => {
   const { rows } = await pool.query('SELECT * FROM orders WHERE id = $1', [req.params.id]);
   if (rows.length === 0) return res.status(404).json({ error: 'Заказ не найден' });
   const order = rows[0];
