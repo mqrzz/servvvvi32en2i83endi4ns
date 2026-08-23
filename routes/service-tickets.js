@@ -1,6 +1,6 @@
 const express = require('express');
 const pool = require('../db/pool');
-const { requireAuth, requireAdmin } = require('../middleware/requireAuth');
+const { requireAuth, requireAdmin, requireUserOrService } = require('../middleware/requireAuth');
 
 const router = express.Router();
 
@@ -20,6 +20,8 @@ function toClient(t) {
     adminReply: t.admin_reply,
     status: t.status,
     rating: t.rating,
+    paid: t.paid,
+    paidAt: t.paid_at,
     createdAt: t.created_at,
     updatedAt: t.updated_at,
   };
@@ -43,6 +45,17 @@ router.get('/', requireAuth, async (req, res) => {
   sql += ' ORDER BY created_at DESC';
   const { rows } = await pool.query(sql, params);
   res.json(rows.map(toClient));
+});
+
+// ── GET /api/service-tickets/:id ── один тикет (владелец, включая доступ через сервисный токен)
+router.get('/:id', requireUserOrService, async (req, res) => {
+  const { rows } = await pool.query('SELECT * FROM service_tickets WHERE id = $1', [req.params.id]);
+  if (rows.length === 0) return res.status(404).json({ error: 'Заявка не найдена' });
+  const ticket = rows[0];
+  if (ticket.user_id !== req.user.id && req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Доступ запрещён' });
+  }
+  res.json(toClient(ticket));
 });
 
 // ── POST /api/service-tickets ── создать заявку на доработку
