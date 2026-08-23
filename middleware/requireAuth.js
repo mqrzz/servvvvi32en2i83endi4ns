@@ -1,5 +1,5 @@
 const pool = require('../db/pool');
-const { verifySessionToken, hashToken } = require('../utils/tokens');
+const { verifySessionToken, hashToken, verifyServiceToken } = require('../utils/tokens');
 
 // Проверяет cookie с токеном, находит активную сессию в БД, кладёт req.user
 async function requireAuth(req, res, next) {
@@ -40,4 +40,28 @@ async function requireAdmin(req, res, next) {
   });
 }
 
-module.exports = { requireAuth, requireAdmin };
+// Для эндпоинтов, которые дёргает и браузер (через cookie), и доверенные
+// сторонние сервисы от лица юзера (Vercel payment-функции — через короткоживущий
+// сервисный токен, см. utils/tokens.js). Пробуем cookie первой, иначе — заголовок
+// Authorization: Bearer <service token>.
+async function requireUserOrService(req, res, next) {
+  if (req.cookies?.session) return requireAuth(req, res, next);
+
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  if (!token) return res.status(401).json({ error: 'Не авторизован' });
+
+  const payload = verifyServiceToken(token);
+  if (!payload) return res.status(401).json({ error: 'Недействительный или истёкший токен' });
+
+  const { rows } = await pool.query(
+    'SELECT id, email, display_name, role, photo_url FROM users WHERE id = $1',
+    [payload.uid]
+  );
+  if (rows.length === 0) return res.status(401).json({ error: 'Пользователь не найден' });
+
+  req.user = { ...rows[0], session_id: null };
+  next();
+}
+
+module.exports = { requireAuth, requireAdmin, requireUserOrService };
