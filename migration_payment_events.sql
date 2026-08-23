@@ -1,0 +1,14 @@
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS last_payment_at TIMESTAMPTZ;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS out_sum NUMERIC(10,2);
+
+ALTER TABLE service_tickets ADD COLUMN IF NOT EXISTS paid BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE service_tickets ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS payment_events (
+    payment_id  TEXT PRIMARY KEY,
+    order_id    UUID REFERENCES orders(id) ON DELETE SET NULL,
+    ticket_id   UUID REFERENCES service_tickets(id) ON DELETE SET NULL,
+    type        TEXT NOT NULL,
+    amount      NUMERIC(10,2) NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
