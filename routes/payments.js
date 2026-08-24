@@ -183,22 +183,39 @@ router.post('/check', requireUserOrService, async (req, res) => {
 
   function isRecent(d) { return !!d && (Date.now() - new Date(d).getTime()) < RECENT_WINDOW_MS; }
 
+  // Номер платежа ЮKассы для отображения на payment_success — раньше не
+  // возвращался вообще, страница просто скрывала эту строку.
+  async function latestPaymentId(ticketFilter) {
+    const { rows } = await pool.query(
+      ticketFilter
+        ? `SELECT payment_id FROM payment_events WHERE order_id = $1 AND ticket_id = $2 ORDER BY created_at DESC LIMIT 1`
+        : `SELECT payment_id FROM payment_events WHERE order_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      ticketFilter ? [orderId, ticketFilter] : [orderId]
+    );
+    return rows[0]?.payment_id || null;
+  }
+
   if (pType === 'ticket_once') {
     if (!ticketId) return res.status(400).json({ error: 'ticketId обязателен' });
     const { rows: tRows } = await pool.query('SELECT * FROM service_tickets WHERE id = $1', [ticketId]);
     if (tRows.length === 0) return res.status(404).json({ error: 'Заявка не найдена' });
     const ticket = tRows[0];
     if (ticket.user_id !== req.user.id || ticket.order_id !== orderId) return res.status(403).json({ error: 'Не ваша заявка' });
-    return res.json({ paid: !!ticket.paid, amount: 350, paidAt: ticket.paid_at });
+    return res.json({ paid: !!ticket.paid, amount: 350, paidAt: ticket.paid_at, paymentId: await latestPaymentId(ticketId) });
   }
 
   if (pType === 'support') {
     const paid = !!order.support_active && isRecent(order.last_payment_at);
-    return res.json({ paid, amount: order.out_sum ? Number(order.out_sum) : null, paidAt: order.last_payment_at });
+    return res.json({ paid, amount: order.out_sum ? Number(order.out_sum) : null, paidAt: order.last_payment_at, paymentId: paid ? await latestPaymentId() : null });
   }
 
   const paid = isRecent(order.last_payment_at) && (pType === 'partial' ? Number(order.paid_amount || 0) > 0 : !!order.paid);
-  res.json({ paid, amount: paid ? Number(order.out_sum || order.paid_amount || 0) : null, paidAt: order.last_payment_at });
+  res.json({
+    paid,
+    amount: paid ? Number(order.out_sum || order.paid_amount || 0) : null,
+    paidAt: order.last_payment_at,
+    paymentId: paid ? await latestPaymentId() : null,
+  });
 });
 
 module.exports = router;
