@@ -10,13 +10,28 @@ async function requireAuth(req, res, next) {
   if (!payload) return res.status(401).json({ error: 'Сессия недействительна' });
 
   const tokenHash = hashToken(token);
-  const { rows } = await pool.query(
-    `SELECT s.id as session_id, u.id, u.email, u.display_name, u.role, u.photo_url, u.onboarding_done, u.created_at
-     FROM sessions s
-     JOIN users u ON u.id = s.user_id
-     WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now()`,
-    [tokenHash]
-  );
+
+  // ВАЖНО: раньше этот запрос не был обёрнут в try/catch. Если он падает
+  // (например забытый GRANT на таблицу sessions/users — та же история, что
+  // уже была с payment_events), Express 4 не ловит это как обычную ошибку в
+  // async-мидлваре — запрос просто зависает или рвётся без внятного ответа,
+  // а на фронте это выглядит ТОЧНО как "меня разлогинило", хотя сессия на
+  // самом деле в порядке, просто запрос к базе не прошёл. Теперь такая
+  // ошибка ловится, логируется с реальной причиной и возвращает понятный
+  // 500, а не тихо ломает запрос под видом "не авторизован".
+  let rows;
+  try {
+    ({ rows } = await pool.query(
+      `SELECT s.id as session_id, u.id, u.email, u.display_name, u.role, u.photo_url, u.onboarding_done, u.created_at
+       FROM sessions s
+       JOIN users u ON u.id = s.user_id
+       WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now()`,
+      [tokenHash]
+    ));
+  } catch (err) {
+    console.error('requireAuth: ошибка запроса к БД при проверке сессии:', err);
+    return res.status(500).json({ error: 'Временная ошибка проверки сессии, попробуйте ещё раз' });
+  }
 
   if (rows.length === 0) {
     return res.status(401).json({ error: 'Сессия истекла или отозвана' });
@@ -25,7 +40,9 @@ async function requireAuth(req, res, next) {
   req.user = rows[0];
 
   // Обновляем "последняя активность" не блокируя ответ
-  pool.query('UPDATE sessions SET last_active_at = now() WHERE id = $1', [rows[0].session_id]).catch(() => {});
+  pool.query('UPDATE sessions SET last_active_at = now() WHERE id = $1', [rows[0].session_id]).catch((err) => {
+    console.error('requireAuth: не удалось обновить last_active_at:', err);
+  });
 
   next();
 }
@@ -54,10 +71,16 @@ async function requireUserOrService(req, res, next) {
   const payload = verifyServiceToken(token);
   if (!payload) return res.status(401).json({ error: 'Недействительный или истёкший токен' });
 
-  const { rows } = await pool.query(
-    'SELECT id, email, display_name, role, photo_url FROM users WHERE id = $1',
-    [payload.uid]
-  );
+  let rows;
+  try {
+    ({ rows } = await pool.query(
+      'SELECT id, email, display_name, role, photo_url FROM users WHERE id = $1',
+      [payload.uid]
+    ));
+  } catch (err) {
+    console.error('requireUserOrService: ошибка запроса к БД:', err);
+    return res.status(500).json({ error: 'Временная ошибка проверки доступа, попробуйте ещё раз' });
+  }
   if (rows.length === 0) return res.status(401).json({ error: 'Пользователь не найден' });
 
   req.user = { ...rows[0], session_id: null };
