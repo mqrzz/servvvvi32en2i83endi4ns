@@ -104,70 +104,90 @@ router.get('/:id/messages', requireAuth, async (req, res) => {
 
 // ── POST /api/tickets/:id/messages ── отправить сообщение (владелец или админ)
 router.post('/:id/messages', requireAuth, async (req, res) => {
-  const { text, imageUrl, asAdmin } = req.body;
-  if (!text && !imageUrl) return res.status(400).json({ error: 'Пустое сообщение' });
+  try {
+    const { text, imageUrl, asAdmin } = req.body;
+    if (!text && !imageUrl) return res.status(400).json({ error: 'Пустое сообщение' });
 
-  const { rows: tRows } = await pool.query('SELECT * FROM tickets WHERE id = $1', [req.params.id]);
-  if (tRows.length === 0) return res.status(404).json({ error: 'Обращение не найдено' });
-  const ticket = tRows[0];
-  const isOwner = ticket.user_id === req.user.id;
-  const isAdmin = req.user.role === 'admin';
-  if (!isOwner && !isAdmin) return res.status(403).json({ error: 'Доступ запрещён' });
+    const { rows: tRows } = await pool.query('SELECT * FROM tickets WHERE id = $1', [req.params.id]);
+    if (tRows.length === 0) return res.status(404).json({ error: 'Обращение не найдено' });
+    const ticket = tRows[0];
+    const isOwner = ticket.user_id === req.user.id;
+    const isAdmin = req.user.role === 'admin';
+    if (!isOwner && !isAdmin) return res.status(403).json({ error: 'Доступ запрещён' });
 
-  // ВАЖНО: раньше "кто пишет" определялось по владению тикетом
-  // (isAdmin && !isOwner) — это ломалось, если админ отвечал в СВОЙ
-  // собственный тикет (например, при тестировании): сообщение подписывалось
-  // как 'user', хотя писал именно админ. Теперь клиент явно говорит, с
-  // какой страницы пришёл запрос (asAdmin=true шлёт только admin/chats.html),
-  // и это имеет приоритет — но подделать это может только тот, у кого
-  // реально role='admin' в базе.
-  const sender = (asAdmin && isAdmin) ? 'admin' : 'user';
-  const { rows } = await pool.query(
-    `INSERT INTO ticket_messages (ticket_id, sender, text, image_url) VALUES ($1,$2,$3,$4) RETURNING *`,
-    [req.params.id, sender, text || null, imageUrl || null]
-  );
-
-  // Обновляем тикет: время + статус (переоткрываем, если юзер написал в закрытый).
-  // is_read = увидел ли КЛИЕНТ последний ответ, admin_read = увидел ли АДМИН
-  // последнее сообщение — это два независимых флага, каждый смотрит на
-  // "чужую" сторону переписки.
-  if (sender === 'admin') {
-    await pool.query(
-      `UPDATE tickets SET updated_at = now(), status = 'open', is_read = FALSE, admin_read = TRUE WHERE id = $1`,
-      [req.params.id]
+    // ВАЖНО: раньше "кто пишет" определялось по владению тикетом
+    // (isAdmin && !isOwner) — это ломалось, если админ отвечал в СВОЙ
+    // собственный тикет (например, при тестировании): сообщение подписывалось
+    // как 'user', хотя писал именно админ. Теперь клиент явно говорит, с
+    // какой страницы пришёл запрос (asAdmin=true шлёт только admin/chats.html),
+    // и это имеет приоритет — но подделать это может только тот, у кого
+    // реально role='admin' в базе.
+    const sender = (asAdmin && isAdmin) ? 'admin' : 'user';
+    const { rows } = await pool.query(
+      `INSERT INTO ticket_messages (ticket_id, sender, text, image_url) VALUES ($1,$2,$3,$4) RETURNING *`,
+      [req.params.id, sender, text || null, imageUrl || null]
     );
-  } else {
-    await pool.query(
-      `UPDATE tickets SET updated_at = now(), status = 'open', is_read = TRUE, admin_read = FALSE WHERE id = $1`,
-      [req.params.id]
-    );
+
+    // Обновляем тикет: время + статус (переоткрываем, если юзер написал в закрытый).
+    // is_read = увидел ли КЛИЕНТ последний ответ, admin_read = увидел ли АДМИН
+    // последнее сообщение — это два независимых флага, каждый смотрит на
+    // "чужую" сторону переписки.
+    if (sender === 'admin') {
+      await pool.query(
+        `UPDATE tickets SET updated_at = now(), status = 'open', is_read = FALSE, admin_read = TRUE WHERE id = $1`,
+        [req.params.id]
+      );
+    } else {
+      await pool.query(
+        `UPDATE tickets SET updated_at = now(), status = 'open', is_read = TRUE, admin_read = FALSE WHERE id = $1`,
+        [req.params.id]
+      );
+    }
+
+    res.json(toClientMessage(rows[0]));
+  } catch (err) {
+    console.error('POST /tickets/:id/messages:', err);
+    res.status(500).json({ error: 'Не удалось отправить сообщение, попробуйте ещё раз' });
   }
-
-  res.json(toClientMessage(rows[0]));
 });
 
 // ── PATCH /api/tickets/:id/read ── отметить прочитанным (владелец)
 router.patch('/:id/read', requireAuth, async (req, res) => {
-  const { rows } = await pool.query(
-    'UPDATE tickets SET is_read = TRUE WHERE id = $1 AND user_id = $2 RETURNING id',
-    [req.params.id, req.user.id]
-  );
-  if (rows.length === 0) return res.status(404).json({ error: 'Обращение не найдено' });
-  res.json({ ok: true });
+  try {
+    const { rows } = await pool.query(
+      'UPDATE tickets SET is_read = TRUE WHERE id = $1 AND user_id = $2 RETURNING id',
+      [req.params.id, req.user.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'Обращение не найдено' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('PATCH /tickets/:id/read:', err);
+    res.status(500).json({ error: 'Не удалось отметить прочитанным' });
+  }
 });
 
 // ── PATCH /api/tickets/:id/admin-read ── отметить прочитанным админом
 router.patch('/:id/admin-read', requireAdmin, async (req, res) => {
-  const { rows } = await pool.query('UPDATE tickets SET admin_read = TRUE WHERE id = $1 RETURNING id', [req.params.id]);
-  if (rows.length === 0) return res.status(404).json({ error: 'Обращение не найдено' });
-  res.json({ ok: true });
+  try {
+    const { rows } = await pool.query('UPDATE tickets SET admin_read = TRUE WHERE id = $1 RETURNING id', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Обращение не найдено' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('PATCH /tickets/:id/admin-read:', err);
+    res.status(500).json({ error: 'Не удалось отметить прочитанным' });
+  }
 });
 
 // ── DELETE /api/tickets/:id ── удалить обращение целиком (только админ)
 router.delete('/:id', requireAdmin, async (req, res) => {
-  const { rows } = await pool.query('DELETE FROM tickets WHERE id = $1 RETURNING id', [req.params.id]);
-  if (rows.length === 0) return res.status(404).json({ error: 'Обращение не найдено' });
-  res.json({ ok: true });
+  try {
+    const { rows } = await pool.query('DELETE FROM tickets WHERE id = $1 RETURNING id', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Обращение не найдено' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('DELETE /tickets/:id:', err);
+    res.status(500).json({ error: 'Не удалось удалить обращение' });
+  }
 });
 
 // ── POST /api/tickets/admin/create ── создать тикет от лица админа (для конкретного юзера)
