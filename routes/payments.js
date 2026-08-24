@@ -131,8 +131,13 @@ router.post('/webhook', requireWebhookSecret, async (req, res) => {
       // admin-роутах orders.js и никогда не срабатывало для настоящей оплаты.
       if (order.status === -1 && order.client_email) {
         sendNewOrderEmail(order.client_email, {
-          orderId: order.id, packageName: order.package, totalPrice: total,
+          orderId: order.id, packageName: order.package, totalPrice: total, paymentId,
         }).catch((e) => console.error('Не удалось отправить письмо о заказе (partial):', e));
+      }
+      // Счётчик использований промокода — раньше нигде не увеличивался,
+      // в админке всегда показывал 0 независимо от реальных применений.
+      if (order.status === -1 && order.promo_code) {
+        await client.query(`UPDATE promo_codes SET used_count = used_count + 1 WHERE UPPER(code) = UPPER($1)`, [order.promo_code]);
       }
     } else if (pType === 'remaining') {
       const totalPaid = Number(order.paid_amount || 0) + outSum;
@@ -153,8 +158,11 @@ router.post('/webhook', requireWebhookSecret, async (req, res) => {
       );
       if (order.status === -1 && order.client_email) {
         sendNewOrderEmail(order.client_email, {
-          orderId: order.id, packageName: order.package, totalPrice: order.total_price,
+          orderId: order.id, packageName: order.package, totalPrice: order.total_price, paymentId,
         }).catch((e) => console.error('Не удалось отправить письмо о заказе:', e));
+      }
+      if (order.status === -1 && order.promo_code) {
+        await client.query(`UPDATE promo_codes SET used_count = used_count + 1 WHERE UPPER(code) = UPPER($1)`, [order.promo_code]);
       }
     }
 
