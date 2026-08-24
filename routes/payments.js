@@ -1,8 +1,13 @@
 const express = require('express');
 const pool = require('../db/pool');
 const { requireUserOrService } = require('../middleware/requireAuth');
+const { sendNewOrderEmail } = require('../utils/mailer');
 
 const router = express.Router();
+
+// Окно, в течение которого последний платёж считается "недавним" для /check
+// (страница payment_success опрашивает этот роут сразу после возврата с оплаты).
+const RECENT_WINDOW_MS = 10 * 60 * 1000;
 
 const TIER_PRICES = {
   'Старт': 2900, 'Рост': 5900, 'Масштаб': 11900,
@@ -121,6 +126,14 @@ router.post('/webhook', requireWebhookSecret, async (req, res) => {
          WHERE id=$5`,
         [total, outSum, remaining, now.toISOString(), orderId]
       );
+      // Письмо шлём только в момент реального перехода из черновика (-1) в
+      // "принят в работу" (0) — раньше это было прописано только в ручных
+      // admin-роутах orders.js и никогда не срабатывало для настоящей оплаты.
+      if (order.status === -1 && order.client_email) {
+        sendNewOrderEmail(order.client_email, {
+          orderId: order.id, packageName: order.package, totalPrice: total,
+        }).catch((e) => console.error('Не удалось отправить письмо о заказе (partial):', e));
+      }
     } else if (pType === 'remaining') {
       const totalPaid = Number(order.paid_amount || 0) + outSum;
       await client.query(
@@ -138,6 +151,11 @@ router.post('/webhook', requireWebhookSecret, async (req, res) => {
          WHERE id=$3`,
         [outSum, now.toISOString(), orderId]
       );
+      if (order.status === -1 && order.client_email) {
+        sendNewOrderEmail(order.client_email, {
+          orderId: order.id, packageName: order.package, totalPrice: order.total_price,
+        }).catch((e) => console.error('Не удалось отправить письмо о заказе:', e));
+      }
     }
 
     await client.query('COMMIT');
