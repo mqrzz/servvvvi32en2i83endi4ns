@@ -6,6 +6,22 @@ const fs = require('fs');
 const path = require('path');
 const { requireAdmin } = require('./middleware/requireAuth');
 
+// ВАЖНО: страховка на уровне всего процесса. Раньше одна забытая колонка
+// в БД (например admin_read у tickets) роняла ВЕСЬ сервис целиком —
+// Node с Express 4 не перехватывает исключения из async-роутов сам, и
+// необработанный reject приводил к падению всего процесса (systemd видел
+// это как "Main process exited, status=1/FAILURE" и рестартовал сервис,
+// а все пользователи в этот момент получали разрыв соединения — это и
+// было причиной "разлогинило"/"тикеты то есть то нет", хотя сама сессия
+// была в порядке). Теперь такая ошибка просто логируется и падает только
+// тот конкретный запрос, а не весь сайт для всех.
+process.on('unhandledRejection', (reason) => {
+  console.error('unhandledRejection (процесс НЕ упал, только залогировано):', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('uncaughtException (процесс НЕ упал, только залогировано):', err);
+});
+
 const authRoutes = require('./routes/auth');
 const sessionsRoutes = require('./routes/sessions');
 const ordersRoutes = require('./routes/orders');
