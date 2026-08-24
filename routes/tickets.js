@@ -104,7 +104,7 @@ router.get('/:id/messages', requireAuth, async (req, res) => {
 
 // ── POST /api/tickets/:id/messages ── отправить сообщение (владелец или админ)
 router.post('/:id/messages', requireAuth, async (req, res) => {
-  const { text, imageUrl } = req.body;
+  const { text, imageUrl, asAdmin } = req.body;
   if (!text && !imageUrl) return res.status(400).json({ error: 'Пустое сообщение' });
 
   const { rows: tRows } = await pool.query('SELECT * FROM tickets WHERE id = $1', [req.params.id]);
@@ -114,7 +114,14 @@ router.post('/:id/messages', requireAuth, async (req, res) => {
   const isAdmin = req.user.role === 'admin';
   if (!isOwner && !isAdmin) return res.status(403).json({ error: 'Доступ запрещён' });
 
-  const sender = isAdmin && !isOwner ? 'admin' : 'user';
+  // ВАЖНО: раньше "кто пишет" определялось по владению тикетом
+  // (isAdmin && !isOwner) — это ломалось, если админ отвечал в СВОЙ
+  // собственный тикет (например, при тестировании): сообщение подписывалось
+  // как 'user', хотя писал именно админ. Теперь клиент явно говорит, с
+  // какой страницы пришёл запрос (asAdmin=true шлёт только admin/chats.html),
+  // и это имеет приоритет — но подделать это может только тот, у кого
+  // реально role='admin' в базе.
+  const sender = (asAdmin && isAdmin) ? 'admin' : 'user';
   const { rows } = await pool.query(
     `INSERT INTO ticket_messages (ticket_id, sender, text, image_url) VALUES ($1,$2,$3,$4) RETURNING *`,
     [req.params.id, sender, text || null, imageUrl || null]
