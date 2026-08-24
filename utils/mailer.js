@@ -183,7 +183,7 @@ async function sendAccountDeletedEmail(toEmail) {
   });
 }
 
-async function sendNewOrderEmail(toEmail, { orderId, packageName, totalPrice }) {
+async function sendNewOrderEmail(toEmail, { orderId, packageName, totalPrice, paymentId }) {
   const html = wrapEmail({
     heading: 'Заказ принят в работу',
     bodyHtml: `
@@ -191,6 +191,7 @@ async function sendNewOrderEmail(toEmail, { orderId, packageName, totalPrice }) 
       <div style="background:#f2f2f4; border-radius:20px; padding:16px 20px; margin:16px 0; font-size:14px; color:#3a3a3e;">
         <div><b>Тариф:</b> ${packageName}</div>
         <div><b>Сумма:</b> ${totalPrice} ₽</div>
+        ${paymentId ? `<div><b>Номер платежа:</b> ${paymentId}</div>` : ''}
       </div>
       ${button('Открыть заказ', `https://antviz.ru/profile/orders?id=${orderId}`)}
     `,
