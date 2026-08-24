@@ -137,7 +137,8 @@ CREATE TABLE tickets (
     order_id     UUID REFERENCES orders(id) ON DELETE SET NULL,
     order_label  TEXT,
     status       TEXT NOT NULL DEFAULT 'open', -- 'open' | 'done'
-    is_read      BOOLEAN NOT NULL DEFAULT TRUE, -- _read
+    is_read      BOOLEAN NOT NULL DEFAULT TRUE, -- _read (увидел ли КЛИЕНТ)
+    admin_read   BOOLEAN NOT NULL DEFAULT FALSE, -- увидел ли АДМИН последнее сообщение
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
