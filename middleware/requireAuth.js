@@ -22,7 +22,8 @@ async function requireAuth(req, res, next) {
   let rows;
   try {
     ({ rows } = await pool.query(
-      `SELECT s.id as session_id, u.id, u.email, u.display_name, u.role, u.photo_url, u.onboarding_done, u.created_at
+      `SELECT s.id as session_id, u.id, u.email, u.display_name, u.role, u.photo_url, u.onboarding_done, u.created_at,
+              u.telegram_id, u.telegram_username
        FROM sessions s
        JOIN users u ON u.id = s.user_id
        WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now()`,
