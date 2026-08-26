@@ -517,34 +517,48 @@ router.post('/bot-login', async (req, res) => {
 // service-token, потому что запрос идёт с bot-вервел-домена, не напрямую
 // с antviz.ru (та же схема, что у оплаты).
 router.patch('/telegram-link', requireUserOrService, async (req, res) => {
-  const { tgChatId, tgUsername } = req.body || {};
-  if (!tgChatId) return res.status(400).json({ error: 'tgChatId обязателен' });
-  await pool.query(
-    `UPDATE users SET telegram_id = $1, telegram_username = $2, telegram_linked_at = now() WHERE id = $3`,
-    [tgChatId, tgUsername || null, req.user.id]
-  );
-  res.json({ ok: true });
+  try {
+    const { tgChatId, tgUsername } = req.body || {};
+    if (!tgChatId) return res.status(400).json({ error: 'tgChatId обязателен' });
+    await pool.query(
+      `UPDATE users SET telegram_id = $1, telegram_username = $2, telegram_linked_at = now() WHERE id = $3`,
+      [tgChatId, tgUsername || null, req.user.id]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('telegram-link error:', err);
+    res.status(500).json({ error: 'Не удалось привязать Telegram' });
+  }
 });
 
-// ── POST /api/auth/telegram-unlink ── отвязка из самого кабинета (Настройки)
 // ── POST /api/auth/telegram-link-token ── создать одноразовый токен для
 // привязки бота (кнопка "Привязать Telegram" в настройках → deep-link
 // t.me/bot?start=<token>, бот меняет его на привязку через /api/bot/link)
 router.post('/telegram-link-token', requireAuth, async (req, res) => {
-  const token = crypto.randomUUID();
-  await pool.query(
-    `INSERT INTO bot_tokens (token, user_id, purpose, expires_at) VALUES ($1,$2,'link',$3)`,
-    [token, req.user.id, new Date(Date.now() + 15 * 60 * 1000)]
-  );
-  res.json({ token });
+  try {
+    const token = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO bot_tokens (token, user_id, purpose, expires_at) VALUES ($1,$2,'link',$3)`,
+      [token, req.user.id, new Date(Date.now() + 15 * 60 * 1000)]
+    );
+    res.json({ token });
+  } catch (err) {
+    console.error('telegram-link-token error:', err);
+    res.status(500).json({ error: 'Не удалось создать ссылку привязки' });
+  }
 });
 
 router.post('/telegram-unlink', requireAuth, async (req, res) => {
-  await pool.query(
-    `UPDATE users SET telegram_id = NULL, telegram_username = NULL, telegram_linked_at = NULL WHERE id = $1`,
-    [req.user.id]
-  );
-  res.json({ ok: true });
+  try {
+    await pool.query(
+      `UPDATE users SET telegram_id = NULL, telegram_username = NULL, telegram_linked_at = NULL WHERE id = $1`,
+      [req.user.id]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('telegram-unlink error:', err);
+    res.status(500).json({ error: 'Не удалось отвязать Telegram' });
+  }
 });
 
 // ── GET /api/auth/whoami ── кто это, по cookie ИЛИ по сервисному токену.
@@ -553,7 +567,12 @@ router.post('/telegram-unlink', requireAuth, async (req, res) => {
 // сюда, чтобы убедиться, что зовущий реально админ, прежде чем слать
 // уведомление в Telegram от его имени.
 router.get('/whoami', requireUserOrService, async (req, res) => {
-  res.json({ uid: req.user.id, role: req.user.role });
+  try {
+    res.json({ uid: req.user.id, role: req.user.role });
+  } catch (err) {
+    console.error('whoami error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
 });
 
 module.exports = router;
