@@ -1,5 +1,6 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const disposableDomains = require('disposable-email-domains');
 const UAParser = require('ua-parser-js');
 const pool = require('../db/pool');
@@ -7,7 +8,7 @@ const { generateCode, hashCode, verifyCode } = require('../utils/codes');
 const { sendCodeEmail, sendNewDeviceLoginEmail, sendAccountDeletedEmail } = require('../utils/mailer');
 const { signSessionToken, hashToken, sessionExpiryDate, SESSION_DAYS, signServiceToken } = require('../utils/tokens');
 const { sendCodeLimiter, verifyCodeLimiter } = require('../middleware/rateLimiters');
-const { requireAuth } = require('../middleware/requireAuth');
+const { requireAuth, requireUserOrService } = require('../middleware/requireAuth');
 
 const router = express.Router();
 
@@ -352,6 +353,8 @@ router.get('/me', requireAuth, async (req, res) => {
     role: req.user.role,
     onboardingDone: req.user.onboarding_done,
     createdAt: req.user.created_at,
+    telegramId: req.user.telegram_id,
+    telegramUsername: req.user.telegram_username,
   });
 });
 
@@ -456,6 +459,101 @@ router.post('/delete-account', verifyCodeLimiter, requireAuth, async (req, res) 
 // до другого домена).
 router.post('/service-token', requireAuth, async (req, res) => {
   res.json({ token: signServiceToken(req.user.id) });
+});
+
+// ── POST /api/auth/bot-login ── вход из мини-аппа Telegram по одноразовому
+// коду, который выписал бот (POST /api/bot/app-link-code). Раньше этим
+// занимался tg-enter.html через Firebase custom token + signInWithCustomToken
+// на другом домене — а это НЕ создавало cookie-сессию нового бэкенда, вход
+// был по факту нерабочим. Теперь всё честно происходит здесь же, на
+// antviz.ru, и ставит ту же самую httpOnly cookie, что и обычный логин.
+router.post('/bot-login', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { code } = req.body || {};
+    if (!code) return res.status(400).json({ error: 'code обязателен' });
+
+    const { rows } = await client.query(
+      `SELECT * FROM bot_tokens WHERE token = $1 AND purpose = 'app_auth'`,
+      [code]
+    );
+    if (rows.length === 0) return res.status(401).json({ error: 'Код недействителен или уже использован' });
+    const tok = rows[0];
+    await client.query('DELETE FROM bot_tokens WHERE token = $1', [code]); // одноразовый
+
+    if (new Date(tok.expires_at) < new Date()) {
+      return res.status(401).json({ error: 'Код истёк, откройте кнопку в боте ещё раз' });
+    }
+
+    const { rows: uRows } = await client.query('SELECT * FROM users WHERE id = $1', [tok.user_id]);
+    if (uRows.length === 0) return res.status(404).json({ error: 'Пользователь не найден' });
+    const user = uRows[0];
+
+    await client.query('BEGIN');
+    const ban = await checkBan(client, user.id);
+    if (ban) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Аккаунт заблокирован', reason: ban.reason, until: ban.until });
+    }
+    const { token } = await createSession(client, user.id, req);
+    await client.query('COMMIT');
+
+    setSessionCookie(res, token);
+    res.json({
+      ok: true,
+      user: { id: user.id, email: user.email, displayName: user.display_name, photoUrl: user.photo_url, role: user.role },
+    });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('bot-login error:', err);
+    res.status(500).json({ error: 'Не удалось войти' });
+  } finally {
+    client.release();
+  }
+});
+
+// ── PATCH /api/auth/telegram-link ── привязка Telegram из мини-аппа
+// (auth.html, открытый внутри Telegram) — вызывается через мост
+// service-token, потому что запрос идёт с bot-вервел-домена, не напрямую
+// с antviz.ru (та же схема, что у оплаты).
+router.patch('/telegram-link', requireUserOrService, async (req, res) => {
+  const { tgChatId, tgUsername } = req.body || {};
+  if (!tgChatId) return res.status(400).json({ error: 'tgChatId обязателен' });
+  await pool.query(
+    `UPDATE users SET telegram_id = $1, telegram_username = $2, telegram_linked_at = now() WHERE id = $3`,
+    [tgChatId, tgUsername || null, req.user.id]
+  );
+  res.json({ ok: true });
+});
+
+// ── POST /api/auth/telegram-unlink ── отвязка из самого кабинета (Настройки)
+// ── POST /api/auth/telegram-link-token ── создать одноразовый токен для
+// привязки бота (кнопка "Привязать Telegram" в настройках → deep-link
+// t.me/bot?start=<token>, бот меняет его на привязку через /api/bot/link)
+router.post('/telegram-link-token', requireAuth, async (req, res) => {
+  const token = crypto.randomUUID();
+  await pool.query(
+    `INSERT INTO bot_tokens (token, user_id, purpose, expires_at) VALUES ($1,$2,'link',$3)`,
+    [token, req.user.id, new Date(Date.now() + 15 * 60 * 1000)]
+  );
+  res.json({ token });
+});
+
+router.post('/telegram-unlink', requireAuth, async (req, res) => {
+  await pool.query(
+    `UPDATE users SET telegram_id = NULL, telegram_username = NULL, telegram_linked_at = NULL WHERE id = $1`,
+    [req.user.id]
+  );
+  res.json({ ok: true });
+});
+
+// ── GET /api/auth/whoami ── кто это, по cookie ИЛИ по сервисному токену.
+// Нужен ботовому notify.js (на Vercel, чужой домен): админка получает
+// обычный service-token (POST /service-token), notify.js пересылает его
+// сюда, чтобы убедиться, что зовущий реально админ, прежде чем слать
+// уведомление в Telegram от его имени.
+router.get('/whoami', requireUserOrService, async (req, res) => {
+  res.json({ uid: req.user.id, role: req.user.role });
 });
 
 module.exports = router;
