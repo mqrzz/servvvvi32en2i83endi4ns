@@ -19,6 +19,17 @@ function requireBotSecret(req, res, next) {
 }
 router.use(requireBotSecret);
 
+// Обёртка вместо ручного try/catch в каждом роуте — именно из-за пропущенного
+// try/catch завис запрос "Привязать Telegram" в настройках. Дальше уже
+// невозможно забыть его добавить, потому что все роуты ниже проходят через
+// неё одинаково.
+function wrap(fn) {
+  return (req, res, next) => Promise.resolve(fn(req, res, next)).catch((err) => {
+    console.error(`bot.js ${req.method} ${req.path}:`, err);
+    res.status(500).json({ error: 'internal error' });
+  });
+}
+
 const TOKEN_TTL = { link: 15 * 60 * 1000, app_auth: 3 * 60 * 1000 };
 
 function toClientNotification(n) {
@@ -27,7 +38,7 @@ function toClientNotification(n) {
 
 // ── POST /api/bot/link ── привязка аккаунта по токену из личного кабинета
 // Тело: { token, chatId, username }
-router.post('/link', async (req, res) => {
+router.post('/link', wrap(async (req, res) => {
   const { token, chatId, username } = req.body || {};
   if (!token || !chatId) return res.status(400).json({ error: 'token и chatId обязательны' });
 
@@ -49,10 +60,10 @@ router.post('/link', async (req, res) => {
   if (uRows.length === 0) return res.status(404).json({ error: 'user_not_found' });
   const u = uRows[0];
   res.json({ uid: u.id, displayName: u.display_name, isAdmin: u.role === 'admin' });
-});
+}));
 
 // ── POST /api/bot/unlink ── отвязка по chatId (кнопка "Отвязать" в боте)
-router.post('/unlink', async (req, res) => {
+router.post('/unlink', wrap(async (req, res) => {
   const { chatId } = req.body || {};
   if (!chatId) return res.status(400).json({ error: 'chatId обязателен' });
   await pool.query(
@@ -60,10 +71,10 @@ router.post('/unlink', async (req, res) => {
     [chatId]
   );
   res.json({ ok: true });
-});
+}));
 
 // ── GET /api/bot/user-by-chat/:chatId ── найти uid по chatId (аналог findUidByChat)
-router.get('/user-by-chat/:chatId', async (req, res) => {
+router.get('/user-by-chat/:chatId', wrap(async (req, res) => {
   const { rows } = await pool.query(
     'SELECT id, display_name, role FROM users WHERE telegram_id = $1',
     [req.params.chatId]
@@ -71,12 +82,12 @@ router.get('/user-by-chat/:chatId', async (req, res) => {
   if (rows.length === 0) return res.status(404).json({ error: 'not_linked' });
   const u = rows[0];
   res.json({ uid: u.id, displayName: u.display_name, isAdmin: u.role === 'admin' });
-});
+}));
 
 // ── POST /api/bot/app-link-code ── одноразовый код для входа в мини-апп из бота
 // Тело: { uid } → { code }. tg-enter.html обменивает code на реальную сессию
 // через POST /api/auth/bot-login (там же, на antviz-backend, не через бота).
-router.post('/app-link-code', async (req, res) => {
+router.post('/app-link-code', wrap(async (req, res) => {
   const { uid } = req.body || {};
   if (!uid) return res.status(400).json({ error: 'uid обязателен' });
   const code = crypto.randomUUID();
@@ -85,21 +96,21 @@ router.post('/app-link-code', async (req, res) => {
     [code, uid, new Date(Date.now() + TOKEN_TTL.app_auth)]
   );
   res.json({ code });
-});
+}));
 
 // ── POST /api/bot/service-token ── короткоживущий токен для оплаты от лица юзера
 // (та же механика, что POST /api/auth/service-token для браузера, только тут
 // личность подтверждает не cookie-сессия, а секрет бота + прямое указание uid)
-router.post('/service-token', async (req, res) => {
+router.post('/service-token', wrap(async (req, res) => {
   const { uid } = req.body || {};
   if (!uid) return res.status(400).json({ error: 'uid обязателен' });
   const { rows } = await pool.query('SELECT id FROM users WHERE id = $1', [uid]);
   if (rows.length === 0) return res.status(404).json({ error: 'user_not_found' });
   res.json({ token: signServiceToken(uid) });
-});
+}));
 
 // ── GET /api/bot/profile-summary/:uid ── сводка для шапки "Профиль" в боте
-router.get('/profile-summary/:uid', async (req, res) => {
+router.get('/profile-summary/:uid', wrap(async (req, res) => {
   const { uid } = req.params;
   const { rows: uRows } = await pool.query('SELECT display_name FROM users WHERE id = $1', [uid]);
   if (uRows.length === 0) return res.status(404).json({ error: 'user_not_found' });
@@ -113,10 +124,10 @@ router.get('/profile-summary/:uid', async (req, res) => {
   });
 
   res.json({ displayName: uRows[0].display_name, activeOrders, supportSites });
-});
+}));
 
 // ── GET /api/bot/orders?uid=&status=&limit= ── список заказов юзера
-router.get('/orders', async (req, res) => {
+router.get('/orders', wrap(async (req, res) => {
   const { uid, status, limit } = req.query;
   if (!uid) return res.status(400).json({ error: 'uid обязателен' });
   const params = [uid];
@@ -126,19 +137,19 @@ router.get('/orders', async (req, res) => {
   if (limit) { params.push(Number(limit)); sql += ` LIMIT $${params.length}`; }
   const { rows } = await pool.query(sql, params);
   res.json(rows.map(toClientOrder));
-});
+}));
 
 // ── GET /api/bot/orders/:id?uid= ── один заказ, с проверкой владельца
-router.get('/orders/:id', async (req, res) => {
+router.get('/orders/:id', wrap(async (req, res) => {
   const { uid } = req.query;
   const { rows } = await pool.query('SELECT * FROM orders WHERE id = $1', [req.params.id]);
   if (rows.length === 0) return res.status(404).json({ error: 'not_found' });
   if (uid && rows[0].user_id !== uid) return res.status(403).json({ error: 'forbidden' });
   res.json(toClientOrder(rows[0]));
-});
+}));
 
 // ── GET /api/bot/notifications?uid=&limit= ──
-router.get('/notifications', async (req, res) => {
+router.get('/notifications', wrap(async (req, res) => {
   const { uid, limit } = req.query;
   if (!uid) return res.status(400).json({ error: 'uid обязателен' });
   const { rows } = await pool.query(
@@ -146,10 +157,10 @@ router.get('/notifications', async (req, res) => {
     [uid, Number(limit) || 3]
   );
   res.json(rows.map(toClientNotification));
-});
+}));
 
 // ── GET /api/bot/stats ── агрегированная статистика для админ-меню бота
-router.get('/stats', async (req, res) => {
+router.get('/stats', wrap(async (req, res) => {
   const { rows: statusRows } = await pool.query('SELECT status, COUNT(*)::int AS c FROM orders GROUP BY status');
   const counts = { total: 0, waitingPay: 0, waitingTop: 0, done: 0, active: 0 };
   statusRows.forEach(r => {
@@ -161,22 +172,22 @@ router.get('/stats', async (req, res) => {
   });
   const { rows: linkedRows } = await pool.query('SELECT COUNT(*)::int AS c FROM users WHERE telegram_id IS NOT NULL');
   res.json({ ...counts, linked: linkedRows[0].c });
-});
+}));
 
 // ── GET /api/bot/broadcast-targets ── все chatId привязанных пользователей
-router.get('/broadcast-targets', async (req, res) => {
+router.get('/broadcast-targets', wrap(async (req, res) => {
   const { rows } = await pool.query('SELECT id, telegram_id FROM users WHERE telegram_id IS NOT NULL');
   res.json(rows.map(r => ({ uid: r.id, chatId: r.telegram_id })));
-});
+}));
 
 // ── GET/POST /api/bot/kv/:key ── простое key-value для состояния бота
 // (техработы бота, "жду текст рассылки от админа" — на Vercel нет своего
 // файлового хранилища как .maintenance на VPS, поэтому храним в БД)
-router.get('/kv/:key', async (req, res) => {
+router.get('/kv/:key', wrap(async (req, res) => {
   const { rows } = await pool.query('SELECT value FROM kv_settings WHERE key = $1', [req.params.key]);
   res.json({ value: rows.length ? rows[0].value : null });
-});
-router.post('/kv/:key', async (req, res) => {
+}));
+router.post('/kv/:key', wrap(async (req, res) => {
   const { value } = req.body || {};
   await pool.query(
     `INSERT INTO kv_settings (key, value, updated_at) VALUES ($1,$2,now())
@@ -184,18 +195,18 @@ router.post('/kv/:key', async (req, res) => {
     [req.params.key, JSON.stringify(value)]
   );
   res.json({ ok: true });
-});
-router.delete('/kv/:key', async (req, res) => {
+}));
+router.delete('/kv/:key', wrap(async (req, res) => {
   await pool.query('DELETE FROM kv_settings WHERE key = $1', [req.params.key]);
   res.json({ ok: true });
-});
+}));
 
 // ── GET /api/bot/tg-chat-for-user/:uid ── telegram_id по uid (для notify.js —
 // после того как он сам проверил через /api/auth/whoami, что зовущий админ)
-router.get('/tg-chat-for-user/:uid', async (req, res) => {
+router.get('/tg-chat-for-user/:uid', wrap(async (req, res) => {
   const { rows } = await pool.query('SELECT telegram_id FROM users WHERE id = $1', [req.params.uid]);
   if (rows.length === 0) return res.status(404).json({ error: 'user_not_found' });
   res.json({ chatId: rows[0].telegram_id });
-});
+}));
 
 module.exports = router;
