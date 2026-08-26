@@ -1,6 +1,7 @@
 const express = require('express');
 const pool = require('../db/pool');
 const { requireAuth, requireAdmin } = require('../middleware/requireAuth');
+const { notifyTelegram } = require('../utils/notifyTelegram');
 
 const router = express.Router();
 
@@ -61,6 +62,13 @@ router.post('/broadcast', requireAdmin, async (req, res) => {
     const values = userIds.map((_, i) => `($${i * 3 + 1}, $${i * 3 + 2}, $${i * 3 + 3})`).join(',');
     const params = userIds.flatMap(id => [id, title, text]);
     await pool.query(`INSERT INTO notifications (user_id, title, text) VALUES ${values}`, params);
+
+    // Тем, у кого привязан Telegram — дублируем в бота (без await каждого:
+    // рассылка на 100+ юзеров не должна ждать 100 последовательных запросов
+    // к Vercel, все уходят параллельно).
+    userIds.forEach((uid) => {
+      notifyTelegram(uid, { title, text, buttonText: 'Открыть', buttonUrl: 'https://antviz.ru/profile/notifications.html' });
+    });
 
     res.json({ ok: true, sent: userIds.length });
   } catch (err) {
