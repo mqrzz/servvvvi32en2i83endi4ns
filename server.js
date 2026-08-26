@@ -33,6 +33,7 @@ const bansRoutes = require('./routes/bans');
 const reviewsRoutes = require('./routes/reviews');
 const usersRoutes = require('./routes/users');
 const paymentsRoutes = require('./routes/payments');
+const botRoutes = require('./routes/bot');
 
 const app = express();
 
@@ -85,6 +86,7 @@ app.use('/api/bans', bansRoutes);
 app.use('/api/reviews', reviewsRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/payments', paymentsRoutes);
+app.use('/api/bot', botRoutes);
 
 // Единый обработчик ошибок — чтобы стектрейсы не улетали на фронт
 app.use((err, req, res, next) => {
