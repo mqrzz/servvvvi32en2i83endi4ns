@@ -20,12 +20,37 @@ CREATE TABLE users (
     onboarding_done BOOLEAN NOT NULL DEFAULT FALSE, -- из welcome.html
     telegram_id     BIGINT UNIQUE,                  -- привязка к боту (для tg-enter.html)
     telegram_username TEXT,
+    telegram_linked_at TIMESTAMPTZ,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_users_email ON users(email);
 CREATE INDEX idx_users_telegram_id ON users(telegram_id);
+
+-- =====================================================
+-- 1.1 ОДНОРАЗОВЫЕ ТОКЕНЫ БОТА (привязка аккаунта / вход из мини-аппа)
+-- =====================================================
+CREATE TABLE bot_tokens (
+    token       TEXT PRIMARY KEY,
+    user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    purpose     TEXT NOT NULL, -- 'link' (привязка бота к аккаунту) | 'app_auth' (вход в мини-апп из бота)
+    expires_at  TIMESTAMPTZ NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_bot_tokens_expires ON bot_tokens(expires_at);
+
+-- =====================================================
+-- 1.2 ПРОСТОЕ KEY-VALUE ХРАНИЛИЩЕ ДЛЯ БОТА
+-- Vercel-функции бота не имеют своего постоянного хранилища (в отличие от
+-- VPS с файлом .maintenance) — техработы бота и состояние "жду текст
+-- рассылки от админа" храним здесь.
+-- =====================================================
+CREATE TABLE kv_settings (
+    key         TEXT PRIMARY KEY,
+    value       JSONB NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 -- =====================================================
 -- 2. КОДЫ ПОДТВЕРЖДЕНИЯ (вход по email+код)
