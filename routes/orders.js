@@ -216,3 +216,4 @@ router.patch('/:id/status', requireAdmin, async (req, res) => {
 });
 
 module.exports = router;
+module.exports.toClientOrder = toClientOrder;
