@@ -211,4 +211,56 @@ module.exports = {
   sendNewDeviceLoginEmail,
   sendAccountDeletedEmail,
   sendNewOrderEmail,
+  sendStatusSubscribedEmail,
+  sendIncidentUpdateEmail,
 };
+
+// ── Статус-страница: подтверждение подписки ──
+async function sendStatusSubscribedEmail(toEmail, unsubscribeUrl) {
+  const html = wrapEmail({
+    heading: 'Подписка на статус Antviz',
+    bodyHtml: `
+      <p>Вы подписались на уведомления об изменении статуса сервисов Antviz и новых инцидентах.</p>
+      <p style="margin-top:12px;">Письма будут приходить только когда что-то действительно меняется — без рассылок.</p>
+      ${button('Смотреть статус', 'https://antviz.ru/status')}
+    `,
+    footerNote: `Antviz &middot; antviz.ru<br/><a href="${unsubscribeUrl}" style="color:#9a9a9e;">Отписаться от уведомлений о статусе</a>`,
+  });
+
+  await transporter.sendMail({
+    from: process.env.MAIL_FROM,
+    to: toEmail,
+    subject: 'Вы подписались на статус Antviz',
+    html,
+    attachments: baseAttachments(),
+  });
+}
+
+// ── Статус-страница: новое обновление по инциденту ──
+const INCIDENT_STATUS_LABELS = {
+  investigating: 'Расследуем',
+  identified: 'Причина найдена',
+  monitoring: 'Наблюдаем',
+  resolved: 'Устранено',
+};
+
+async function sendIncidentUpdateEmail(toEmail, { incidentTitle, status, message, unsubscribeUrl }) {
+  const label = INCIDENT_STATUS_LABELS[status] || status;
+  const html = wrapEmail({
+    heading: incidentTitle,
+    bodyHtml: `
+      <div style="display:inline-block; background:${status === 'resolved' ? '#e8fcf2' : '#fff4e5'}; color:${status === 'resolved' ? '#149955' : '#b45309'}; font-size:12px; font-weight:700; padding:4px 12px; border-radius:100px; text-transform:uppercase; letter-spacing:.03em; margin-bottom:14px;">${label}</div>
+      <p>${message}</p>
+      ${button('Смотреть статус', 'https://antviz.ru/status')}
+    `,
+    footerNote: `Antviz &middot; antviz.ru<br/><a href="${unsubscribeUrl}" style="color:#9a9a9e;">Отписаться от уведомлений о статусе</a>`,
+  });
+
+  await transporter.sendMail({
+    from: process.env.MAIL_FROM,
+    to: toEmail,
+    subject: `[Antviz Status] ${incidentTitle} — ${label}`,
+    html,
+    attachments: baseAttachments(),
+  });
+}
