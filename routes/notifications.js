@@ -44,7 +44,7 @@ router.patch('/read-all', requireAuth, async (req, res) => {
 // target: 'all' | конкретный user_id
 router.post('/broadcast', requireAdmin, async (req, res) => {
   try {
-    const { target, title, text } = req.body;
+    const { target, title, text, buttonText, buttonUrl } = req.body;
     if (!title || !text) return res.status(400).json({ error: 'Заполните тему и текст' });
 
     let userIds;
@@ -65,9 +65,16 @@ router.post('/broadcast', requireAdmin, async (req, res) => {
 
     // Тем, у кого привязан Telegram — дублируем в бота (без await каждого:
     // рассылка на 100+ юзеров не должна ждать 100 последовательных запросов
-    // к Vercel, все уходят параллельно).
+    // к Vercel, все уходят параллельно). Кнопка — на конкретную страницу,
+    // если вызывающий её передал (например admin/chats.html шлёт сюда же
+    // при ответе в поддержке и указывает ссылку прямо на чат), иначе —
+    // на общую страницу уведомлений.
     userIds.forEach((uid) => {
-      notifyTelegram(uid, { title, text, buttonText: 'Открыть', buttonUrl: 'https://antviz.ru/profile/notifications.html' });
+      notifyTelegram(uid, {
+        title, text,
+        buttonText: buttonText || 'Открыть',
+        buttonUrl: buttonUrl || 'https://antviz.ru/profile/notifications.html',
+      });
     });
 
     res.json({ ok: true, sent: userIds.length });
