@@ -241,6 +241,14 @@ router.patch('/services/:id', requireAdmin, async (req, res) => {
 
     if (fields.length === 0) return res.status(400).json({ error: 'Нечего обновлять' });
 
+    // Меняется URL или тип проверки — старая история проверок относится к другому
+    // способу проверки и больше не отражает реальность нового. Чтобы % аптайма не
+    // мешал старые (возможно ошибочные) данные с новыми — чистим историю при смене.
+    const changingCheckMethod = checkUrl !== undefined || checkType !== undefined;
+    if (changingCheckMethod) {
+      await pool.query('DELETE FROM status_checks WHERE service_id = $1', [req.params.id]);
+    }
+
     values.push(req.params.id);
     const { rows } = await pool.query(
       `UPDATE status_services SET ${fields.join(', ')} WHERE id = $${i} RETURNING *`,
