@@ -1,7 +1,6 @@
 const express = require('express');
 const pool = require('../db/pool');
 const { requireAuth, requireAdmin } = require('../middleware/requireAuth');
-const { notifyTelegram } = require('../utils/notifyTelegram');
 
 const router = express.Router();
 
@@ -138,14 +137,11 @@ router.post('/:id/messages', requireAuth, async (req, res) => {
         `UPDATE tickets SET updated_at = now(), status = 'open', is_read = FALSE, admin_read = TRUE WHERE id = $1`,
         [req.params.id]
       );
-      // Не ждём (без await) — уведомление в Telegram не должно задерживать
-      // ответ клиенту в самом чате, если оно вдруг не отправится.
-      notifyTelegram(ticket.user_id, {
-        title: 'Новый ответ в поддержке',
-        text: (text || 'Прислали файл').slice(0, 300),
-        buttonText: 'Открыть чат',
-        buttonUrl: 'https://antviz.ru/profile/support.html',
-      });
+      // ВАЖНО: пуш в Telegram сюда НЕ добавляем — admin/chats.html после
+      // отправки сообщения сам дёргает POST /api/notifications/broadcast
+      // (функция notifyClient), а тот роут уже отправляет уведомление в
+      // Telegram сам. Если продублировать здесь — клиент получит одно и то
+      // же сообщение в боте дважды (ровно это и произошло при первой версии).
     } else {
       await pool.query(
         `UPDATE tickets SET updated_at = now(), status = 'open', is_read = TRUE, admin_read = FALSE WHERE id = $1`,
