@@ -458,7 +458,12 @@ router.post('/delete-account', verifyCodeLimiter, requireAuth, async (req, res) 
 // Authorization при вызове оплаты, минуя cookie, которая не долетает
 // до другого домена).
 router.post('/service-token', requireAuth, async (req, res) => {
-  res.json({ token: signServiceToken(req.user.id) });
+  try {
+    res.json({ token: signServiceToken(req.user.id) });
+  } catch (err) {
+    console.error('service-token error:', err);
+    res.status(500).json({ error: 'Не удалось выдать токен' });
+  }
 });
 
 // ── POST /api/auth/bot-login ── вход из мини-аппа Telegram по одноразовому
