@@ -5,6 +5,7 @@ const pool = require('../db/pool');
 const { requireAdmin } = require('../middleware/requireAuth');
 const { sendStatusSubscribedEmail, sendIncidentUpdateEmail } = require('../utils/mailer');
 const statusMonitor = require('../lib/statusMonitor');
+const { notifySubscribers } = require('../lib/statusNotify');
 
 const router = express.Router();
 
@@ -33,7 +34,9 @@ const dayKeyFmt = new Intl.DateTimeFormat('en-CA', { timeZone: TIMEZONE }); // -
 
 async function buildUptime(serviceId) {
   const { rows } = await pool.query(
-    `SELECT (checked_at AT TIME ZONE '${TIMEZONE}')::date AS day, bool_and(ok) AS all_ok, count(*) AS total
+    `SELECT (checked_at AT TIME ZONE '${TIMEZONE}')::date AS day,
+            count(*) FILTER (WHERE ok) AS ok_count,
+            count(*) AS total
      FROM status_checks
      WHERE service_id = $1 AND checked_at > now() - interval '${UPTIME_DAYS} days'
      GROUP BY day
@@ -41,23 +44,28 @@ async function buildUptime(serviceId) {
     [serviceId]
   );
 
-  const byDay = new Map(rows.map((r) => [dayKeyFmt.format(r.day), r.all_ok]));
+  // day -> {okCount, total}. Если за день упали НЕ ВСЕ проверки — статус 'degraded'
+  // (жёлтый), а не 'major' (красный) — красный только если упало вообще всё.
+  const byDay = new Map(rows.map((r) => [dayKeyFmt.format(r.day), { ok: Number(r.ok_count), total: Number(r.total) }]));
 
   const days = [];
-  let okCount = 0;
-  let knownCount = 0;
+  let okSum = 0;
+  let totalSum = 0;
   for (let i = UPTIME_DAYS - 1; i >= 0; i--) {
     const key = dayKeyFmt.format(new Date(Date.now() - i * 86400000));
-    const known = byDay.has(key);
-    const ok = known ? byDay.get(key) : null; // null = нет данных за этот день (например сервис без check_url)
-    if (known) {
-      knownCount++;
-      if (ok) okCount++;
+    const d = byDay.get(key);
+    let status = null; // нет данных за этот день
+    if (d && d.total > 0) {
+      okSum += d.ok;
+      totalSum += d.total;
+      if (d.ok === d.total) status = 'ok';
+      else if (d.ok === 0) status = 'major';
+      else status = 'degraded';
     }
-    days.push({ date: key, ok });
+    days.push({ date: key, status });
   }
 
-  const uptimePct = knownCount > 0 ? Math.round((okCount / knownCount) * 10000) / 100 : null;
+  const uptimePct = totalSum > 0 ? Math.round((okSum / totalSum) * 10000) / 100 : null;
   return { days, uptimePct };
 }
 
@@ -196,7 +204,7 @@ router.post('/services', requireAdmin, async (req, res) => {
   try {
     const { name, slug, checkUrl, checkType, sortOrder } = req.body || {};
     if (!name || !slug) return res.status(400).json({ error: 'Заполните название и slug' });
-    const type = ['http', 'telegram_webhook'].includes(checkType) ? checkType : 'http';
+    const type = ['http', 'telegram_webhook', 'github_status'].includes(checkType) ? checkType : 'http';
 
     const { rows } = await pool.query(
       `INSERT INTO status_services (name, slug, check_url, check_type, sort_order) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
@@ -220,7 +228,7 @@ router.patch('/services/:id', requireAdmin, async (req, res) => {
     if (name !== undefined) { fields.push(`name = $${i++}`); values.push(name); }
     if (checkUrl !== undefined) { fields.push(`check_url = $${i++}`); values.push(checkUrl || null); }
     if (checkType !== undefined) {
-      if (!['http', 'telegram_webhook'].includes(checkType)) return res.status(400).json({ error: 'Некорректный check_type' });
+      if (!['http', 'telegram_webhook', 'github_status'].includes(checkType)) return res.status(400).json({ error: 'Некорректный check_type' });
       fields.push(`check_type = $${i++}`); values.push(checkType);
     }
     if (checkHeaders !== undefined) { fields.push(`check_headers = $${i++}`); values.push(checkHeaders ? JSON.stringify(checkHeaders) : null); }
@@ -266,21 +274,7 @@ router.delete('/services/:id', requireAdmin, async (req, res) => {
   res.json({ ok: true });
 });
 
-// ── Рассылка обновления всем подписчикам (используется при создании инцидента и апдейтов) ──
-async function notifySubscribers({ incidentTitle, status, message }) {
-  const { rows: subs } = await pool.query('SELECT email, unsubscribe_token FROM status_subscribers');
-  await Promise.all(
-    subs.map((s) =>
-      sendIncidentUpdateEmail(s.email, {
-        incidentTitle,
-        status,
-        message,
-        unsubscribeUrl: `https://antviz.ru/api/status/unsubscribe/${s.unsubscribe_token}`,
-      }).catch((err) => console.error(`notifySubscribers: не удалось отправить на ${s.email}:`, err))
-    )
-  );
-}
-
+// Рассылка подписчикам — общая функция, см. lib/statusNotify.js
 // ── POST /api/status/incidents ── создать инцидент (+ первая запись таймлайна) ──
 router.post('/incidents', requireAdmin, async (req, res) => {
   try {
