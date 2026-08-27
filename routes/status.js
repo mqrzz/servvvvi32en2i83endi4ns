@@ -120,7 +120,18 @@ router.get('/', async (req, res) => {
       return (rank[s.status] || 0) > (rank[acc] || 0) ? s.status : acc;
     }, 'ok');
 
-    res.json({ overall: worst, services: withUptime, incidents, updatedAt: new Date().toISOString() });
+    // Отдаём имена затронутых сервисов отдельно — на фронте формулировка баннера
+    // должна отличаться для "не работает один сервис" и "проблемы массово",
+    // а не всегда писать "серьёзные перебои" из-за одного упавшего.
+    const affectedServiceNames = withUptime.filter((s) => s.status !== 'ok').map((s) => s.name);
+
+    res.json({
+      overall: worst,
+      affectedServiceNames,
+      services: withUptime,
+      incidents,
+      updatedAt: new Date().toISOString(),
+    });
   } catch (err) {
     console.error('GET /api/status error:', err);
     res.status(500).json({ error: 'Не удалось получить статус' });
@@ -229,10 +240,12 @@ router.patch('/services/:id', requireAdmin, async (req, res) => {
     );
     if (rows.length === 0) return res.status(404).json({ error: 'Сервис не найден' });
 
-    // Сняли ручную фиксацию — сразу гоняем реальную проверку вместо того чтобы
-    // показывать последний вручную выставленный статус ещё до 5 минут (следующий
-    // плановый цикл монитора). Без этого выглядело так, будто статус "сам поменялся".
-    if (manualOverride === false) {
+    // Сняли ручную фиксацию ИЛИ поменяли способ проверки (URL/тип/заголовки) — в обоих
+    // случаях сразу гоняем реальную проверку вместо того чтобы ждать до 5 минут
+    // (следующий плановый цикл монитора). Раньше выглядело так, будто данные не
+    // совпадают с реальностью — статус уже "ok", а % аптайма ещё старый.
+    const needsInstantRecheck = manualOverride === false || checkUrl !== undefined || checkType !== undefined || checkHeaders !== undefined;
+    if (needsInstantRecheck) {
       await statusMonitor.checkService(req.params.id).catch((err) =>
         console.error('PATCH /services/:id: мгновенная перепроверка не удалась:', err)
       );
