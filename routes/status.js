@@ -26,9 +26,14 @@ function isValidEmail(email) {
 }
 
 // ── Считает % аптайма и 90 дневных статусов из status_checks для одного сервиса ──
+// Дни считаем по московскому времени (сайт российский), а не по UTC — иначе
+// граница "сегодня/вчера" уезжает на 3 часа и путает даже настоящие данные.
+const TIMEZONE = 'Europe/Moscow';
+const dayKeyFmt = new Intl.DateTimeFormat('en-CA', { timeZone: TIMEZONE }); // -> YYYY-MM-DD
+
 async function buildUptime(serviceId) {
   const { rows } = await pool.query(
-    `SELECT date_trunc('day', checked_at) AS day, bool_and(ok) AS all_ok, count(*) AS total
+    `SELECT (checked_at AT TIME ZONE '${TIMEZONE}')::date AS day, bool_and(ok) AS all_ok, count(*) AS total
      FROM status_checks
      WHERE service_id = $1 AND checked_at > now() - interval '${UPTIME_DAYS} days'
      GROUP BY day
@@ -36,15 +41,13 @@ async function buildUptime(serviceId) {
     [serviceId]
   );
 
-  const byDay = new Map(rows.map((r) => [r.day.toISOString().slice(0, 10), r.all_ok]));
+  const byDay = new Map(rows.map((r) => [dayKeyFmt.format(r.day), r.all_ok]));
 
   const days = [];
   let okCount = 0;
   let knownCount = 0;
   for (let i = UPTIME_DAYS - 1; i >= 0; i--) {
-    const d = new Date();
-    d.setUTCDate(d.getUTCDate() - i);
-    const key = d.toISOString().slice(0, 10);
+    const key = dayKeyFmt.format(new Date(Date.now() - i * 86400000));
     const known = byDay.has(key);
     const ok = known ? byDay.get(key) : null; // null = нет данных за этот день (например сервис без check_url)
     if (known) {
