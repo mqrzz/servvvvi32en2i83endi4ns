@@ -4,6 +4,7 @@ const rateLimit = require('express-rate-limit');
 const pool = require('../db/pool');
 const { requireAdmin } = require('../middleware/requireAuth');
 const { sendStatusSubscribedEmail, sendIncidentUpdateEmail } = require('../utils/mailer');
+const statusMonitor = require('../lib/statusMonitor');
 
 const router = express.Router();
 
@@ -224,6 +225,18 @@ router.patch('/services/:id', requireAdmin, async (req, res) => {
       values
     );
     if (rows.length === 0) return res.status(404).json({ error: 'Сервис не найден' });
+
+    // Сняли ручную фиксацию — сразу гоняем реальную проверку вместо того чтобы
+    // показывать последний вручную выставленный статус ещё до 5 минут (следующий
+    // плановый цикл монитора). Без этого выглядело так, будто статус "сам поменялся".
+    if (manualOverride === false) {
+      await statusMonitor.checkService(req.params.id).catch((err) =>
+        console.error('PATCH /services/:id: мгновенная перепроверка не удалась:', err)
+      );
+      const { rows: fresh } = await pool.query('SELECT * FROM status_services WHERE id = $1', [req.params.id]);
+      return res.json(fresh[0]);
+    }
+
     res.json(rows[0]);
   } catch (err) {
     console.error('PATCH /api/status/services/:id error:', err);
@@ -311,11 +324,20 @@ router.post('/incidents/:id/updates', requireAdmin, async (req, res) => {
       [status, status === 'resolved' ? new Date() : null, incident.id]
     );
 
-    // Инцидент устранён — возвращаем сервис в 'ok' (если не override)
+    // Инцидент устранён — пересчитываем статус сервиса по ОСТАВШИМСЯ открытым
+    // инцидентам (если есть другой открытый инцидент на этот же сервис — статус
+    // должен остаться на его severity, а не сброситься в 'ok' вслепую)
     if (status === 'resolved' && incident.service_id) {
+      const { rows: stillOpen } = await pool.query(
+        `SELECT severity FROM status_incidents WHERE service_id = $1 AND status != 'resolved' AND id != $2`,
+        [incident.service_id, incident.id]
+      );
+      const rank = { degraded: 1, maint: 1, partial: 2, major: 3 };
+      const worst = stillOpen.reduce((acc, r) => (rank[r.severity] > rank[acc] ? r.severity : acc), null);
+
       await pool.query(
-        `UPDATE status_services SET status = 'ok' WHERE id = $1 AND manual_override = FALSE`,
-        [incident.service_id]
+        `UPDATE status_services SET status = $1 WHERE id = $2 AND manual_override = FALSE`,
+        [worst || 'ok', incident.service_id]
       );
     }
 
