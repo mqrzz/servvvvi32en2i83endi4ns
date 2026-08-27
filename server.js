@@ -34,6 +34,8 @@ const reviewsRoutes = require('./routes/reviews');
 const usersRoutes = require('./routes/users');
 const paymentsRoutes = require('./routes/payments');
 const botRoutes = require('./routes/bot');
+const statusRoutes = require('./routes/status');
+const statusMonitor = require('./lib/statusMonitor');
 
 const app = express();
 
@@ -87,6 +89,7 @@ app.use('/api/reviews', reviewsRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/payments', paymentsRoutes);
 app.use('/api/bot', botRoutes);
+app.use('/api/status', statusRoutes);
 
 // Единый обработчик ошибок — чтобы стектрейсы не улетали на фронт
 app.use((err, req, res, next) => {
@@ -97,4 +100,5 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Antviz backend запущен на порту ${PORT}`);
+  statusMonitor.start(); // реальные самопроверки сервисов для /status, раз в 5 минут
 });
