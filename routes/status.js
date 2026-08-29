@@ -195,23 +195,25 @@ router.post('/subscribe', subscribeLimiter, async (req, res) => {
     const captchaOk = await verifyTurnstile(req.body?.cfToken);
     if (!captchaOk) return res.status(400).json({ error: 'Не пройдена проверка капчи, попробуйте ещё раз' });
 
+    // Уже подписан — не шлём письмо повторно и не трогаем токен отписки,
+    // просто говорим об этом честно, отдельным сообщением.
+    const existing = await pool.query('SELECT id FROM status_subscribers WHERE email = $1', [email]);
+    if (existing.rows.length > 0) {
+      return res.json({ ok: true, alreadySubscribed: true });
+    }
+
     const token = crypto.randomBytes(24).toString('hex');
-    // ON CONFLICT — повторная подписка на тот же email не ошибка, просто подтверждаем
-    // ещё раз (по той же логике, что и повторная регистрация с тем же email).
-    const { rows } = await pool.query(
-      `INSERT INTO status_subscribers (email, unsubscribe_token) VALUES ($1,$2)
-       ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
-       RETURNING unsubscribe_token`,
+    await pool.query(
+      `INSERT INTO status_subscribers (email, unsubscribe_token) VALUES ($1,$2)`,
       [email, token]
     );
-    const finalToken = rows[0].unsubscribe_token;
-    const unsubscribeUrl = `https://antviz.ru/api/status/unsubscribe/${finalToken}`;
+    const unsubscribeUrl = `https://antviz.ru/api/status/unsubscribe/${token}`;
 
     sendStatusSubscribedEmail(email, unsubscribeUrl).catch((err) =>
       console.error('sendStatusSubscribedEmail error:', err)
     );
 
-    res.json({ ok: true });
+    res.json({ ok: true, alreadySubscribed: false });
   } catch (err) {
     console.error('POST /api/status/subscribe error:', err);
     res.status(500).json({ error: 'Не удалось оформить подписку' });
