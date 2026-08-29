@@ -73,7 +73,7 @@ INSERT INTO status_services (name, slug, check_url, sort_order) VALUES
     ('Основной сайт (antviz.ru)', 'site',     'https://antviz.ru/',              0),
     ('Личный кабинет',            'cabinet',  'https://antviz.ru/profile',       1),
     ('API и вебхуки',             'api',      'https://api.antviz.ru/api/health',2),
-    ('Платежи (YooKassa)',        'payments', NULL,                              3),
+    ('Платежи (ЮKassa)',        'payments', NULL,                              3),
     ('Telegram-бот',              'bot',      NULL,                              4),
     ('Push-уведомления',          'push',     NULL,                              5)
 ON CONFLICT (slug) DO NOTHING;
@@ -92,3 +92,10 @@ ALTER TABLE status_services ADD COLUMN IF NOT EXISTS check_headers JSONB;
 
 UPDATE status_services SET check_url = 'https://api-lac-six-78.vercel.app/api/createPayment' WHERE slug = 'payments';
 UPDATE status_services SET check_type = 'telegram_webhook', check_url = NULL WHERE slug = 'bot';
+
+-- =====================================================
+-- Аддендум: запланированные работы (scheduled_at) — инцидент можно завести
+-- заранее, он не сразу считается "активным", появляется в отдельном блоке
+-- "Запланировано" на публичной странице.
+-- =====================================================
+ALTER TABLE status_incidents ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMPTZ;
