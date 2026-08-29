@@ -88,6 +88,7 @@ async function buildUptime(serviceId) {
   const days = [];
   let okSum = 0;
   let totalSum = 0;
+  let daysWithData = 0;
   for (let i = UPTIME_DAYS - 1; i >= 0; i--) {
     const key = dayKeyFmt.format(new Date(Date.now() - i * 86400000));
     const d = byDay.get(key);
@@ -95,6 +96,7 @@ async function buildUptime(serviceId) {
     if (d && d.total > 0) {
       okSum += d.ok;
       totalSum += d.total;
+      daysWithData++;
       if (d.ok === d.total) status = 'ok';
       else if (d.ok === 0) status = 'major';
       else status = 'degraded';
@@ -103,7 +105,9 @@ async function buildUptime(serviceId) {
   }
 
   const uptimePct = totalSum > 0 ? Math.round((okSum / totalSum) * 10000) / 100 : null;
-  return { days, uptimePct };
+  // Сколько дней реально есть данных — если меньше 90, честно показываем "за N дней",
+  // а не "за 90 дней", когда реально накопился один-два дня наблюдений.
+  return { days, uptimePct, daysWithData };
 }
 
 function serviceToClient(s, uptime, latestLatencyMs) {
@@ -115,6 +119,7 @@ function serviceToClient(s, uptime, latestLatencyMs) {
     manualOverride: s.manual_override,
     hasCheckUrl: !!s.check_url || s.check_type === 'telegram_webhook',
     uptimePct: uptime.uptimePct,
+    daysWithData: uptime.daysWithData,
     latencyMs: latestLatencyMs,
     days: uptime.days,
   };
