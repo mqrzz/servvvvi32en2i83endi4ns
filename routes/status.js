@@ -1,6 +1,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
+const disposableDomains = require('disposable-email-domains');
 const pool = require('../db/pool');
 const { requireAdmin } = require('../middleware/requireAuth');
 const { sendStatusSubscribedEmail, sendIncidentUpdateEmail } = require('../utils/mailer');
@@ -8,6 +9,42 @@ const statusMonitor = require('../lib/statusMonitor');
 const { notifySubscribers } = require('../lib/statusNotify');
 
 const router = express.Router();
+
+const disposableSet = new Set(disposableDomains);
+function isDisposableEmail(email) {
+  const domain = email.split('@')[1]?.toLowerCase();
+  return domain ? disposableSet.has(domain) : false;
+}
+
+// ── Настоящая проверка капчи на бэкенде (не через сторонний прокси, а
+// напрямую в Cloudflare Turnstile) — без валидного токена подписка не пройдёт.
+// Нужен TURNSTILE_SECRET_KEY в .env (Cloudflare Dashboard -> Turnstile -> сайт -> Secret Key,
+// та же пара, что и sitekey 0x4AAAAAADsZsKfyIeKi6Yr- на фронте).
+// Проверка капчи — через тот же самый Vercel-прокси, что уже используется на
+// логине/регистрации (cloudflarecaptcha900374938.vercel.app), просто вызываем его
+// с бэкенда, а не с фронта — так проверку нельзя обойти правкой JS в браузере.
+// Никакого отдельного секретного ключа на этом сервере не нужно — он уже есть
+// в том Vercel-проекте, ровно как для входа/регистрации.
+async function verifyTurnstile(token) {
+  if (!token) return false;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    const resp = await fetch('https://cloudflarecaptcha900374938.vercel.app/api/verifyTurnstile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    const data = await resp.json();
+    return !!data.success;
+  } catch (err) {
+    console.error('verifyTurnstile: прокси недоступен:', err);
+    return false; // строгий режим — недоступна проверка -> считаем, что не пройдена
+  }
+}
+
 
 const UPTIME_DAYS = 90;
 const SEVERITIES = ['degraded', 'partial', 'major', 'maint'];
@@ -151,8 +188,16 @@ router.post('/subscribe', subscribeLimiter, async (req, res) => {
   try {
     const email = String(req.body?.email || '').trim().toLowerCase();
     if (!isValidEmail(email)) return res.status(400).json({ error: 'Введите корректный email' });
+    if (isDisposableEmail(email)) {
+      return res.status(400).json({ error: 'Временные (одноразовые) email не поддерживаются, укажите постоянный адрес' });
+    }
+
+    const captchaOk = await verifyTurnstile(req.body?.cfToken);
+    if (!captchaOk) return res.status(400).json({ error: 'Не пройдена проверка капчи, попробуйте ещё раз' });
 
     const token = crypto.randomBytes(24).toString('hex');
+    // ON CONFLICT — повторная подписка на тот же email не ошибка, просто подтверждаем
+    // ещё раз (по той же логике, что и повторная регистрация с тем же email).
     const { rows } = await pool.query(
       `INSERT INTO status_subscribers (email, unsubscribe_token) VALUES ($1,$2)
        ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
