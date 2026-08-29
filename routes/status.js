@@ -106,7 +106,7 @@ async function buildUptime(serviceId) {
   return { days, uptimePct };
 }
 
-function serviceToClient(s, uptime) {
+function serviceToClient(s, uptime, latestLatencyMs) {
   return {
     id: s.id,
     name: s.name,
@@ -115,8 +115,19 @@ function serviceToClient(s, uptime) {
     manualOverride: s.manual_override,
     hasCheckUrl: !!s.check_url || s.check_type === 'telegram_webhook',
     uptimePct: uptime.uptimePct,
+    latencyMs: latestLatencyMs,
     days: uptime.days,
   };
+}
+
+// Время ответа последней успешной проверки — просто для информации рядом со статусом
+async function latestLatency(serviceId) {
+  const { rows } = await pool.query(
+    `SELECT latency_ms FROM status_checks WHERE service_id = $1 AND ok = TRUE
+     ORDER BY checked_at DESC LIMIT 1`,
+    [serviceId]
+  );
+  return rows[0]?.latency_ms ?? null;
 }
 
 async function incidentsWithUpdates(limit = 30) {
@@ -143,6 +154,11 @@ async function incidentsWithUpdates(limit = 30) {
     serviceName: i.service_name,
     createdAt: i.created_at,
     resolvedAt: i.resolved_at,
+    scheduledAt: i.scheduled_at,
+    // группа для фронта: активное сейчас / запланировано на будущее / история (закрыто)
+    group: i.status === 'resolved'
+      ? 'history'
+      : (i.scheduled_at && new Date(i.scheduled_at) > new Date() ? 'scheduled' : 'active'),
     updates: updates
       .filter((u) => u.incident_id === i.id)
       .map((u) => ({ status: u.status, message: u.message, createdAt: u.created_at })),
@@ -155,7 +171,7 @@ router.get('/', async (req, res) => {
     const { rows: services } = await pool.query('SELECT * FROM status_services ORDER BY sort_order');
 
     const withUptime = await Promise.all(
-      services.map(async (s) => serviceToClient(s, await buildUptime(s.id)))
+      services.map(async (s) => serviceToClient(s, await buildUptime(s.id), await latestLatency(s.id)))
     );
 
     const incidents = await incidentsWithUpdates();
@@ -333,14 +349,21 @@ router.delete('/services/:id', requireAdmin, async (req, res) => {
 // ── POST /api/status/incidents ── создать инцидент (+ первая запись таймлайна) ──
 router.post('/incidents', requireAdmin, async (req, res) => {
   try {
-    const { title, severity, serviceId, message } = req.body || {};
+    const { title, severity, serviceId, message, scheduledAt } = req.body || {};
     if (!title || !message) return res.status(400).json({ error: 'Заполните заголовок и описание' });
     if (!SEVERITIES.includes(severity)) return res.status(400).json({ error: 'Некорректная серьёзность' });
 
+    let scheduledDate = null;
+    if (scheduledAt) {
+      scheduledDate = new Date(scheduledAt);
+      if (isNaN(scheduledDate.getTime())) return res.status(400).json({ error: 'Некорректная дата' });
+    }
+    const isFuturePlan = scheduledDate && scheduledDate > new Date();
+
     const { rows: incRows } = await pool.query(
-      `INSERT INTO status_incidents (service_id, title, severity, status, created_by)
-       VALUES ($1,$2,$3,'investigating',$4) RETURNING *`,
-      [serviceId || null, title, severity, req.user.email]
+      `INSERT INTO status_incidents (service_id, title, severity, status, created_by, scheduled_at)
+       VALUES ($1,$2,$3,'investigating',$4,$5) RETURNING *`,
+      [serviceId || null, title, severity, req.user.email, scheduledDate]
     );
     const incident = incRows[0];
 
@@ -350,8 +373,10 @@ router.post('/incidents', requireAdmin, async (req, res) => {
       [incident.id, message, req.user.email]
     );
 
-    // Пока инцидент открыт — статус сервиса подсвечивается его severity (если не override)
-    if (serviceId) {
+    // Пока инцидент открыт — статус сервиса подсвечивается его severity (если не override).
+    // Если это запланированные работы на будущее — статус сервиса пока НЕ трогаем,
+    // он появится в разделе "Запланировано", а не как активная проблема прямо сейчас.
+    if (serviceId && !isFuturePlan) {
       await pool.query(
         `UPDATE status_services SET status = $1 WHERE id = $2 AND manual_override = FALSE`,
         [severity, serviceId]
