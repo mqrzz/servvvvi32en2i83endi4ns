@@ -448,4 +448,71 @@ router.delete('/incidents/:id', requireAdmin, async (req, res) => {
   res.json({ ok: true });
 });
 
+// ════════════════════════════════════════════════════════════
+// Диагностика сети сервера — админ-инструмент, не публичная часть
+// статус-страницы. Показывает: публичный IP сервера (+ провайдер, город),
+// пинг до нескольких надёжных точек (чтобы отличить "у меня проблема с
+// конкретным сервисом" от "у сервера вообще проблемы с интернетом"),
+// и тест скорости по запросу.
+// ════════════════════════════════════════════════════════════
+
+const DIAG_TARGETS = [
+  { name: 'Cloudflare', url: 'https://www.cloudflare.com/cdn-cgi/trace' },
+  { name: 'Google', url: 'https://www.google.com/generate_204' },
+  { name: 'Яндекс', url: 'https://ya.ru/' },
+  { name: 'GitHub', url: 'https://github.com/' },
+  { name: 'Telegram API', url: 'https://api.telegram.org/' },
+];
+
+async function pingOne(url) {
+  const started = Date.now();
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    const resp = await fetch(url, { signal: controller.signal });
+    clearTimeout(timer);
+    return { ok: true, ms: Date.now() - started, statusCode: resp.status };
+  } catch (err) {
+    return { ok: false, ms: Date.now() - started, error: String(err?.message || err) };
+  }
+}
+
+// ── GET /api/status/diagnostics ── IP сервера + пинг до контрольных точек ──
+router.get('/diagnostics', requireAdmin, async (req, res) => {
+  try {
+    let ipInfo = null;
+    try {
+      const ipResp = await fetch('http://ip-api.com/json/?fields=query,country,city,isp,org,as');
+      ipInfo = await ipResp.json();
+    } catch (err) {
+      console.error('diagnostics: не удалось получить IP сервера:', err);
+    }
+
+    const pings = await Promise.all(
+      DIAG_TARGETS.map(async (t) => ({ name: t.name, ...(await pingOne(t.url)) }))
+    );
+
+    res.json({ ip: ipInfo, pings });
+  } catch (err) {
+    console.error('GET /api/status/diagnostics error:', err);
+    res.status(500).json({ error: 'Не удалось получить диагностику' });
+  }
+});
+
+// ── GET /api/status/diagnostics/speedtest ── тест скорости, по запросу (медленный) ──
+router.get('/diagnostics/speedtest', requireAdmin, async (req, res) => {
+  try {
+    const bytes = 15 * 1000 * 1000; // 15 МБ — компромисс между точностью и временем ожидания
+    const started = Date.now();
+    const resp = await fetch(`https://speed.cloudflare.com/__down?bytes=${bytes}`);
+    const buf = await resp.arrayBuffer();
+    const seconds = (Date.now() - started) / 1000;
+    const mbps = Math.round(((buf.byteLength * 8) / 1_000_000 / seconds) * 100) / 100;
+    res.json({ mbps, bytesLoaded: buf.byteLength, seconds: Math.round(seconds * 100) / 100 });
+  } catch (err) {
+    console.error('GET /api/status/diagnostics/speedtest error:', err);
+    res.status(500).json({ error: 'Не удалось выполнить тест скорости' });
+  }
+});
+
 module.exports = router;
