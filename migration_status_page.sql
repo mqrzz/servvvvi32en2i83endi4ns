@@ -2,13 +2,22 @@
 -- STATUS PAGE (antviz-status): сервисы, self-check история,
 -- инциденты с таймлайном, email-подписчики.
 -- Накатывать поверх schema.sql + прошлых migration_*.sql
+--
+-- ВАЖНО: этот файл безопасно катить повторно (все CREATE/ALTER — IF NOT
+-- EXISTS, INSERT — ON CONFLICT DO NOTHING). Тут больше НЕТ одноразовых
+-- UPDATE, которые правили бы уже существующие строки — раньше именно
+-- из-за них повторный прогон миграции откатывал ручные правки в админке
+-- (сервис "push" пересоздавался заново, у бота слетал способ проверки).
+-- Если нужно поменять check_url/check_type/check_headers для существующего
+-- сервиса — делай это через вкладку "Сервисы" в админке на /status.html,
+-- не через миграцию.
 -- =====================================================
 
 -- ── Отслеживаемые сервисы (то, что показываем на /status) ──
 CREATE TABLE IF NOT EXISTS status_services (
     id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name        TEXT NOT NULL,                 -- "Основной сайт (antviz.ru)"
-    slug        TEXT UNIQUE NOT NULL,           -- "site", "cabinet", "bot", "api", "payments", "push"
+    slug        TEXT UNIQUE NOT NULL,           -- "site", "cabinet", "bot", "api", "payments", "github"
     check_url   TEXT,                           -- URL для автопроверки (GET, ожидаем 2xx). NULL = проверяется только вручную
     sort_order  SMALLINT NOT NULL DEFAULT 0,
     -- Текущий статус. 'ok' | 'degraded' | 'partial' | 'major' | 'maint'.
@@ -16,6 +25,11 @@ CREATE TABLE IF NOT EXISTS status_services (
     -- (manual_override = TRUE — тогда монитор не трогает статус, пока override не снят).
     status          TEXT NOT NULL DEFAULT 'ok',
     manual_override BOOLEAN NOT NULL DEFAULT FALSE,
+    -- 'http' (обычный GET) | 'telegram_webhook' (спец-проверка бота через Telegram —
+    -- НЕ используй, если сервер не может достучаться до api.telegram.org напрямую,
+    -- см. lib/statusMonitor.js) | 'github_status' (читает githubstatus.com)
+    check_type      TEXT NOT NULL DEFAULT 'http',
+    check_headers   JSONB,                      -- доп. заголовки для 'http', например Vercel Protection Bypass
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -41,9 +55,12 @@ CREATE TABLE IF NOT EXISTS status_incidents (
     severity    TEXT NOT NULL DEFAULT 'partial',
     -- 'investigating' | 'identified' | 'monitoring' | 'resolved'
     status      TEXT NOT NULL DEFAULT 'investigating',
-    created_by  TEXT,                    -- email админа, создавшего инцидент
+    created_by  TEXT,                    -- email админа, создавшего инцидент, либо 'auto'
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    resolved_at TIMESTAMPTZ
+    resolved_at TIMESTAMPTZ,
+    -- Запланированные работы на будущее — см. POST /api/status/incidents.
+    -- NULL или прошедшая дата = "происходит прямо сейчас".
+    scheduled_at TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_status_incidents_created ON status_incidents(created_at DESC);
@@ -68,34 +85,15 @@ CREATE TABLE IF NOT EXISTS status_subscribers (
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- ── Стартовый набор сервисов (правится позже из админки) ──
-INSERT INTO status_services (name, slug, check_url, sort_order) VALUES
-    ('Основной сайт (antviz.ru)', 'site',     'https://antviz.ru/',              0),
-    ('Личный кабинет',            'cabinet',  'https://antviz.ru/profile',       1),
-    ('API и вебхуки',             'api',      'https://api.antviz.ru/api/health',2),
-    ('Платежи (ЮKassa)',        'payments', NULL,                              3),
-    ('Telegram-бот',              'bot',      NULL,                              4),
-    ('Push-уведомления',          'push',     NULL,                              5)
+-- ── Стартовый набор сервисов (правится позже из админки, а не здесь) ──
+-- check_headers (секреты для Vercel Protection Bypass у payments/bot) сюда
+-- намеренно НЕ зашиты — впиши их один раз через вкладку "Сервисы" в админке
+-- после установки, там же где check_url/check_type.
+INSERT INTO status_services (name, slug, check_url, check_type, sort_order) VALUES
+    ('Основной сайт (antviz.ru)', 'site',     'https://antviz.ru/',                              'http',           0),
+    ('Личный кабинет',            'cabinet',  'https://antviz.ru/profile',                       'http',           1),
+    ('API и вебхуки',             'api',      'http://localhost:3000/api/status',                'http',           2),
+    ('Платежи (ЮKassa)',          'payments', 'https://api-lac-six-78.vercel.app/api/health',    'http',           3),
+    ('Telegram-бот',              'bot',      'https://3ssqztgbot22wsq.vercel.app/api/health',   'http',           4),
+    ('GitHub',                    'github',   'https://www.githubstatus.com/api/v2/status.json', 'github_status',  5)
 ON CONFLICT (slug) DO NOTHING;
-
--- =====================================================
--- Аддендум: тип проверки + доп.заголовки (нужно для Vercel Deployment
--- Protection на платежах — см. check_headers) + токен Telegram-бота
--- =====================================================
-ALTER TABLE status_services ADD COLUMN IF NOT EXISTS check_type TEXT NOT NULL DEFAULT 'http';
--- 'http'             — обычный GET по check_url, ожидаем 2xx/3xx
--- 'telegram_webhook' — спец-проверка через Telegram Bot API (getWebhookInfo),
---                      check_url в этом случае не используется вообще
-ALTER TABLE status_services ADD COLUMN IF NOT EXISTS check_headers JSONB;
--- доп. заголовки для 'http'-проверки, например Vercel Protection Bypass:
--- {"x-vercel-protection-bypass": "секрет_из_настроек_vercel"}
-
-UPDATE status_services SET check_url = 'https://api-lac-six-78.vercel.app/api/createPayment' WHERE slug = 'payments';
-UPDATE status_services SET check_type = 'telegram_webhook', check_url = NULL WHERE slug = 'bot';
-
--- =====================================================
--- Аддендум: запланированные работы (scheduled_at) — инцидент можно завести
--- заранее, он не сразу считается "активным", появляется в отдельном блоке
--- "Запланировано" на публичной странице.
--- =====================================================
-ALTER TABLE status_incidents ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMPTZ;
