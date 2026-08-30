@@ -213,6 +213,54 @@ router.get('/', async (req, res) => {
   }
 });
 
+// ── GET /api/status/feed.xml ── публичное, RSS-фид инцидентов ──
+// Та же самая история инцидентов, что и на странице, просто в формате, который
+// понимают читалки фидов (Feedly и т.п.) — альтернатива email-подписке. Данные
+// уже загружены на каждый обычный визит страницы, здесь просто другая обёртка —
+// заметной нагрузки не добавляет.
+function xmlEscape(s) {
+  return String(s ?? '').replace(/[<>&'"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' }[c]));
+}
+
+const incidentBadgeLabelsServer = {
+  investigating: 'Расследуем', identified: 'Причина найдена',
+  monitoring: 'Наблюдаем', resolved: 'Устранено',
+};
+
+router.get('/feed.xml', async (req, res) => {
+  try {
+    const incidents = await incidentsWithUpdates(50);
+    const items = incidents.map((inc) => {
+      const lastUpdate = inc.updates[inc.updates.length - 1];
+      const link = 'https://antviz.ru/status.html';
+      return `
+    <item>
+      <title>${xmlEscape(inc.title)}${inc.serviceName ? ` — ${xmlEscape(inc.serviceName)}` : ''} (${xmlEscape(incidentBadgeLabelsServer[inc.status] || inc.status)})</title>
+      <link>${link}</link>
+      <guid isPermaLink="false">${inc.id}</guid>
+      <pubDate>${new Date(lastUpdate ? lastUpdate.createdAt : inc.createdAt).toUTCString()}</pubDate>
+      <description>${xmlEscape(inc.updates.map((u) => u.message).join(' | '))}</description>
+    </item>`;
+    }).join('');
+
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Antviz — статус сервисов</title>
+    <link>https://antviz.ru/status.html</link>
+    <description>Инциденты и обновления статуса сервисов Antviz</description>
+    <language>ru</language>${items}
+  </channel>
+</rss>`;
+
+    res.set('Content-Type', 'application/rss+xml; charset=utf-8');
+    res.send(xml);
+  } catch (err) {
+    console.error('GET /api/status/feed.xml error:', err);
+    res.status(500).send('Не удалось сформировать фид');
+  }
+});
+
 // ── POST /api/status/subscribe ── публичное, подписка на уведомления ──
 router.post('/subscribe', subscribeLimiter, async (req, res) => {
   try {
