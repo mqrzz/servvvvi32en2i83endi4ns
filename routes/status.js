@@ -350,6 +350,24 @@ router.delete('/services/:id', requireAdmin, async (req, res) => {
   res.json({ ok: true });
 });
 
+// ── DELETE /api/status/services/:id/checks?date=YYYY-MM-DD ── очистить историю
+// проверок сервиса за один конкретный день (по московскому времени) — например,
+// если день покрашен жёлтым/красным из-за ошибки в настройках мониторинга, а не
+// реального сбоя. После очистки день становится "нет данных" и на графике снова
+// зелёный (дни без данных не считаются проблемой).
+router.delete('/services/:id/checks', requireAdmin, async (req, res) => {
+  const date = req.query.date;
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ error: 'Нужна дата в формате YYYY-MM-DD' });
+  }
+  const { rowCount } = await pool.query(
+    `DELETE FROM status_checks
+     WHERE service_id = $1 AND (checked_at AT TIME ZONE '${TIMEZONE}')::date = $2::date`,
+    [req.params.id, date]
+  );
+  res.json({ ok: true, deleted: rowCount });
+});
+
 // Рассылка подписчикам — общая функция, см. lib/statusNotify.js
 // ── POST /api/status/incidents ── создать инцидент (+ первая запись таймлайна) ──
 router.post('/incidents', requireAdmin, async (req, res) => {
