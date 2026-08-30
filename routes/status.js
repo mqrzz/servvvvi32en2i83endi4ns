@@ -85,6 +85,13 @@ async function buildUptime(serviceId) {
   // (жёлтый), а не 'major' (красный) — красный только если упало вообще всё.
   const byDay = new Map(rows.map((r) => [dayKeyFmt.format(r.day), { ok: Number(r.ok_count), total: Number(r.total) }]));
 
+  // Типичное число проверок за день (раз в 5 минут) — используется как "вес"
+  // дня без данных, чтобы он засчитывался как полностью нормальный, а не просто
+  // выпадал из расчёта. Так пара реально плохих дней не портит картину, если
+  // остальные 88 дней сервис ещё не мониторился (или мониторился, но данные
+  // почистили) — они считаются "в порядке", а не игнорируются нейтрально.
+  const ASSUMED_CHECKS_PER_DAY = Math.round((24 * 60) / 5); // 288, интервал мониторинга — 5 минут
+
   const days = [];
   let okSum = 0;
   let totalSum = 0;
@@ -100,13 +107,15 @@ async function buildUptime(serviceId) {
       if (d.ok === d.total) status = 'ok';
       else if (d.ok === 0) status = 'major';
       else status = 'degraded';
+    } else {
+      // День без данных — засчитываем как полностью нормальный
+      okSum += ASSUMED_CHECKS_PER_DAY;
+      totalSum += ASSUMED_CHECKS_PER_DAY;
     }
     days.push({ date: key, status });
   }
 
-  const uptimePct = totalSum > 0 ? Math.round((okSum / totalSum) * 10000) / 100 : null;
-  // Сколько дней реально есть данных — если меньше 90, честно показываем "за N дней",
-  // а не "за 90 дней", когда реально накопился один-два дня наблюдений.
+  const uptimePct = daysWithData === 0 ? null : Math.round((okSum / totalSum) * 10000) / 100;
   return { days, uptimePct, daysWithData };
 }
 
