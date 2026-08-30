@@ -572,7 +572,9 @@ router.get('/diagnostics', requireAdmin, async (req, res) => {
       DIAG_TARGETS.map(async (t) => ({ name: t.name, ...(await pingOne(t.url)) }))
     );
 
-    res.json({ ip: ipInfo, pings });
+    const { rows: subRows } = await pool.query('SELECT count(*)::int AS n FROM status_subscribers');
+
+    res.json({ ip: ipInfo, pings, subscriberCount: subRows[0].n });
   } catch (err) {
     console.error('GET /api/status/diagnostics error:', err);
     res.status(500).json({ error: 'Не удалось получить диагностику' });
