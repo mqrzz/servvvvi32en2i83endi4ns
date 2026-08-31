@@ -391,6 +391,7 @@ router.get('/yandex/callback', async (req, res) => {
       await client.query('BEGIN');
       let { rows } = await client.query('SELECT * FROM users WHERE yandex_id = $1', [yandexId]);
       let user = rows[0];
+      let isNewUser = false;
 
       if (!user) {
         const byEmail = await client.query('SELECT * FROM users WHERE email = $1', [email]);
@@ -404,6 +405,7 @@ router.get('/yandex/callback', async (req, res) => {
             [email, displayName, yandexId]
           );
           user = inserted.rows[0];
+          isNewUser = true;
         }
       }
 
@@ -419,7 +421,7 @@ router.get('/yandex/callback', async (req, res) => {
       client.release();
 
       setSessionCookie(res, token);
-      res.redirect(`${frontendBase}/profile.html`);
+      res.redirect(`${frontendBase}${isNewUser ? '/welcome.html' : '/profile.html'}`);
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
       client.release();
