@@ -209,6 +209,7 @@ router.post('/login/start', sendCodeLimiter, async (req, res) => {
       return res.status(404).json({ error: 'Аккаунт с таким email не найден' });
     }
     const user = rows[0];
+    const { rows: pkRows } = await pool.query('SELECT 1 FROM passkeys WHERE user_id = $1 LIMIT 1', [user.id]);
 
     const code = generateCode();
     const codeHash = hashCode(code);
@@ -223,6 +224,7 @@ router.post('/login/start', sendCodeLimiter, async (req, res) => {
       ok: true,
       totpAvailable: user.totp_enabled,
       recoveryAvailable: Boolean(user.recovery_code_hash),
+      passkeyAvailable: pkRows.length > 0,
     });
   } catch (err) {
     console.error('login/start error:', err);
@@ -551,7 +553,7 @@ router.delete('/passkey/:id', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
-// Вход по ключу — дискаверабл (без email, браузер сам предлагает сохранённый ключ)
+// Вход по ключу — дискаверабл, без email: браузер сам предлагает сохранённый ключ.
 router.post('/passkey/login-options', async (req, res) => {
   try {
     const options = await generateAuthenticationOptions({
@@ -565,6 +567,38 @@ router.post('/passkey/login-options', async (req, res) => {
     res.json({ options, challengeId: rows[0].id });
   } catch (err) {
     console.error('passkey/login-options error:', err);
+    res.status(500).json({ error: 'Не удалось начать вход по ключу' });
+  }
+});
+
+// Вход по ключу С email — второй шаг в форме входа (альтернатива коду с почты).
+// Ограничиваем allowCredentials конкретными ключами этого аккаунта — так работает
+// предсказуемо даже там, где дискаверабл-подсказка браузера ведёт себя не идеально.
+router.post('/login/passkey-options', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email обязателен' });
+    const normalizedEmail = email.trim().toLowerCase();
+
+    const { rows: userRows } = await pool.query('SELECT id FROM users WHERE email = $1 AND email_verified = TRUE', [normalizedEmail]);
+    if (userRows.length === 0) return res.status(404).json({ error: 'Аккаунт не найден' });
+    const userId = userRows[0].id;
+
+    const { rows: pkRows } = await pool.query('SELECT credential_id FROM passkeys WHERE user_id = $1', [userId]);
+    if (pkRows.length === 0) return res.status(400).json({ error: 'Для этого аккаунта не подключён ключ доступа' });
+
+    const options = await generateAuthenticationOptions({
+      rpID: RP_ID,
+      userVerification: 'preferred',
+      allowCredentials: pkRows.map((p) => ({ id: p.credential_id })),
+    });
+    const { rows } = await pool.query(
+      `INSERT INTO webauthn_challenges (user_id, challenge, purpose, expires_at) VALUES ($1,$2,'login',$3) RETURNING id`,
+      [userId, options.challenge, new Date(Date.now() + CHALLENGE_TTL_MS)]
+    );
+    res.json({ options, challengeId: rows[0].id });
+  } catch (err) {
+    console.error('login/passkey-options error:', err);
     res.status(500).json({ error: 'Не удалось начать вход по ключу' });
   }
 });
