@@ -6,7 +6,7 @@ const QRCode = require('qrcode');
 const pool = require('../db/pool');
 const { generateCode, hashCode, verifyCode } = require('../utils/codes');
 const { sendCodeEmail, sendNewDeviceLoginEmail, sendAccountDeletedEmail } = require('../utils/mailer');
-const { signSessionToken, hashToken, sessionExpiryDate, SESSION_DAYS, signServiceToken } = require('../utils/tokens');
+const { signSessionToken, verifySessionToken, hashToken, sessionExpiryDate, SESSION_DAYS, signServiceToken } = require('../utils/tokens');
 const { sendCodeLimiter, verifyCodeLimiter } = require('../middleware/rateLimiters');
 const { requireAuth, requireUserOrService } = require('../middleware/requireAuth');
 const totp = require('../utils/totp');
@@ -362,6 +362,22 @@ router.get('/yandex/start', (req, res) => {
   res.redirect(getYandexAuthUrl(state));
 });
 
+// Если у запроса есть валидная cookie сессии — считаем, что это не вход,
+// а привязка Яндекса из настроек уже залогиненным пользователем.
+async function getSessionUser(req) {
+  const token = req.cookies?.session;
+  if (!token) return null;
+  const payload = verifySessionToken(token);
+  if (!payload) return null;
+  const tokenHash = hashToken(token);
+  const { rows } = await pool.query(
+    `SELECT u.id, u.email FROM sessions s JOIN users u ON u.id = s.user_id
+     WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now()`,
+    [tokenHash]
+  );
+  return rows[0] || null;
+}
+
 router.get('/yandex/callback', async (req, res) => {
   const frontendBase = process.env.FRONTEND_ORIGIN || 'https://antviz.ru';
   try {
@@ -377,6 +393,17 @@ router.get('/yandex/callback', async (req, res) => {
     const yandexId = String(yUser.id);
     const email = (yUser.default_email || yUser.emails?.[0] || '').trim().toLowerCase();
     const displayName = yUser.display_name || yUser.real_name || yUser.login || 'Пользователь';
+
+    // ── Режим привязки: юзер уже залогинен и просто добавляет Яндекс из настроек ──
+    const sessionUser = await getSessionUser(req);
+    if (sessionUser) {
+      const clash = await pool.query('SELECT id FROM users WHERE yandex_id = $1 AND id != $2', [yandexId, sessionUser.id]);
+      if (clash.rows.length > 0) {
+        return res.redirect(`${frontendBase}/profile/settings.html?yandex_error=taken`);
+      }
+      await pool.query('UPDATE users SET yandex_id = $1 WHERE id = $2', [yandexId, sessionUser.id]);
+      return res.redirect(`${frontendBase}/profile/settings.html?yandex=linked`);
+    }
 
     if (!email) {
       // Яндекс не отдал почту (скрыта настройками приватности) — без email
@@ -431,6 +458,11 @@ router.get('/yandex/callback', async (req, res) => {
     console.error('yandex/callback error:', err);
     res.redirect(`${frontendBase}/auth.html?yandex_error=unknown`);
   }
+});
+
+router.post('/yandex/unlink', requireAuth, async (req, res) => {
+  await pool.query('UPDATE users SET yandex_id = NULL WHERE id = $1', [req.user.id]);
+  res.json({ ok: true });
 });
 
 // =====================================================
