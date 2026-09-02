@@ -191,9 +191,9 @@ router.post('/register/verify', verifyCodeLimiter, async (req, res) => {
 // (сам вход дальше может быть кодом с почты, TOTP или резервным кодом)
 // =====================================================
 
-// ── POST /api/auth/login/start ── проверить, что аккаунт есть, отправить код на почту,
-// и сказать фронту, какие альтернативные способы у аккаунта включены
-router.post('/login/start', sendCodeLimiter, async (req, res) => {
+// ── POST /api/auth/login/start ── ПРОВЕРИТЬ аккаунт и способы входа, письмо НЕ шлём.
+// Фронт по ответу решает: показать выбор способа или сразу слать код (если выбирать не из чего).
+router.post('/login/start', verifyCodeLimiter, async (req, res) => {
   try {
     const { email } = req.body;
     if (!email || !EMAIL_RE.test(email)) return res.status(400).json({ error: 'Некорректный email' });
@@ -204,12 +204,34 @@ router.post('/login/start', sendCodeLimiter, async (req, res) => {
       [normalizedEmail]
     );
     if (rows.length === 0 || !rows[0].email_verified) {
-      // Не подтверждаем/опровергаем существование аккаунта явно в тексте ошибки —
-      // но всё равно приходится сказать, иначе непонятно, что делать дальше.
       return res.status(404).json({ error: 'Аккаунт с таким email не найден' });
     }
     const user = rows[0];
     const { rows: pkRows } = await pool.query('SELECT 1 FROM passkeys WHERE user_id = $1 LIMIT 1', [user.id]);
+
+    res.json({
+      ok: true,
+      totpAvailable: user.totp_enabled,
+      recoveryAvailable: Boolean(user.recovery_code_hash),
+      passkeyAvailable: pkRows.length > 0,
+    });
+  } catch (err) {
+    console.error('login/start error:', err);
+    res.status(500).json({ error: 'Не удалось проверить аккаунт' });
+  }
+});
+
+// ── POST /api/auth/login/send-code ── реально отправить код на почту
+// (вызывается либо сразу, если у аккаунта нет других способов входа,
+// либо когда человек сам нажал «Получить код на почту», либо на «Отправить ещё раз»)
+router.post('/login/send-code', sendCodeLimiter, async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email || !EMAIL_RE.test(email)) return res.status(400).json({ error: 'Некорректный email' });
+    const normalizedEmail = email.trim().toLowerCase();
+
+    const { rows } = await pool.query('SELECT id FROM users WHERE email = $1 AND email_verified = TRUE', [normalizedEmail]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Аккаунт с таким email не найден' });
 
     const code = generateCode();
     const codeHash = hashCode(code);
@@ -220,14 +242,9 @@ router.post('/login/start', sendCodeLimiter, async (req, res) => {
     );
     await sendCodeEmail(normalizedEmail, code, 'login');
 
-    res.json({
-      ok: true,
-      totpAvailable: user.totp_enabled,
-      recoveryAvailable: Boolean(user.recovery_code_hash),
-      passkeyAvailable: pkRows.length > 0,
-    });
+    res.json({ ok: true });
   } catch (err) {
-    console.error('login/start error:', err);
+    console.error('login/send-code error:', err);
     res.status(500).json({ error: 'Не удалось отправить код' });
   }
 });
@@ -693,7 +710,7 @@ router.post('/totp/disable', requireAuth, async (req, res) => {
     if (!totp.verifyToken(rows[0].totp_secret, token)) return res.status(400).json({ error: 'Неверный код' });
 
     await pool.query(
-      `UPDATE users SET totp_secret = NULL, totp_enabled = FALSE, recovery_code_hash = NULL, recovery_code_created_at = NULL WHERE id = $1`,
+      `UPDATE users SET totp_secret = NULL, totp_enabled = FALSE WHERE id = $1`,
       [req.user.id]
     );
     res.json({ ok: true });
@@ -703,19 +720,23 @@ router.post('/totp/disable', requireAuth, async (req, res) => {
   }
 });
 
-// Перевыпуск резервного кода — старый (если был) сразу перестаёт действовать
-router.post('/totp/recovery-code/regenerate', requireAuth, async (req, res) => {
+// Выпуск/перевыпуск резервного кода — не зависит от Authenticator.
+// Если 2FA включена — просим текущий TOTP-код для подтверждения (это более
+// чувствительный случай, код может обойти саму 2FA). Если 2FA выключена —
+// выпускаем сразу, сессии (requireAuth) уже достаточно, как и для остальных
+// действий в Настройках.
+router.post('/recovery-code/issue', requireAuth, async (req, res) => {
   try {
     const { token } = req.body;
     const { rows } = await pool.query('SELECT totp_secret, totp_enabled FROM users WHERE id = $1', [req.user.id]);
-    if (!rows[0]?.totp_enabled) return res.status(400).json({ error: 'Authenticator не подключён' });
-    if (!totp.verifyToken(rows[0].totp_secret, token)) return res.status(400).json({ error: 'Неверный код' });
-
+    if (rows[0]?.totp_enabled) {
+      if (!totp.verifyToken(rows[0].totp_secret, token)) return res.status(400).json({ error: 'Неверный код' });
+    }
     const recoveryCode = await issueRecoveryCode(pool, req.user.id);
     res.json({ ok: true, recoveryCode });
   } catch (err) {
-    console.error('totp/recovery-code/regenerate error:', err);
-    res.status(500).json({ error: 'Не удалось перевыпустить резервный код' });
+    console.error('recovery-code/issue error:', err);
+    res.status(500).json({ error: 'Не удалось выпустить резервный код' });
   }
 });
 
