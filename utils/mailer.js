@@ -116,7 +116,7 @@ function button(text, url) {
     </a>`;
 }
 
-async function sendCodeEmail(toEmail, code, purpose) {
+async function sendCodeEmail(toEmail, code, purpose, magicUrl) {
   const headings = {
     login: 'Код для входа',
     register: 'Подтверждение email',
@@ -130,9 +130,15 @@ async function sendCodeEmail(toEmail, code, purpose) {
     reset_password: 'Вы запросили восстановление пароля Antviz. Введите код ниже, чтобы задать новый пароль:',
   };
 
+  const magicHtml = magicUrl ? `
+    <div style="text-align:center; margin:18px 0 4px;">
+      ${button('Войти одним кликом', magicUrl)}
+      <p style="font-size:12px; color:#9a9a9e; margin-top:10px;">Ссылка одноразовая и работает только в этом браузере/устройстве, где вы запрашивали вход.</p>
+    </div>` : '';
+
   const html = wrapEmail({
     heading: headings[purpose] || 'Код подтверждения',
-    bodyHtml: `<p>${intros[purpose] || ''}</p>${codeBlock(code)}`,
+    bodyHtml: `<p>${intros[purpose] || ''}</p>${codeBlock(code)}${magicHtml}`,
   });
 
   await transporter.sendMail({
