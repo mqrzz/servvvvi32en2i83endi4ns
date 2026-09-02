@@ -240,12 +240,70 @@ router.post('/login/send-code', sendCodeLimiter, async (req, res) => {
       `INSERT INTO auth_codes (email, code_hash, purpose, expires_at, ip_address) VALUES ($1, $2, 'login', $3, $4)`,
       [normalizedEmail, codeHash, expiresAt, req.ip]
     );
-    await sendCodeEmail(normalizedEmail, code, 'login');
+
+    // Магическая ссылка — тот же код входа, просто ещё и одноразовый токен-ссылка
+    // рядом в письме. Раздельная запись в auth_codes с отдельным purpose, чтобы
+    // код и ссылка были независимы (использовал одно — второе всё ещё живо).
+    const magicToken = crypto.randomBytes(24).toString('base64url');
+    await pool.query(
+      `INSERT INTO auth_codes (email, code_hash, purpose, expires_at, ip_address) VALUES ($1, $2, 'login_magic', $3, $4)`,
+      [normalizedEmail, hashCode(magicToken), expiresAt, req.ip]
+    );
+    const magicUrl = `${process.env.API_ORIGIN || 'https://antviz.ru/api'}/auth/login/magic?email=${encodeURIComponent(normalizedEmail)}&token=${magicToken}`;
+
+    await sendCodeEmail(normalizedEmail, code, 'login', magicUrl);
 
     res.json({ ok: true });
   } catch (err) {
     console.error('login/send-code error:', err);
     res.status(500).json({ error: 'Не удалось отправить код' });
+  }
+});
+
+// ── GET /api/auth/login/magic ── переход по ссылке из письма — входит одним кликом
+router.get('/login/magic', async (req, res) => {
+  const frontendBase = process.env.FRONTEND_ORIGIN || 'https://antviz.ru';
+  const client = await pool.connect();
+  try {
+    const { email, token } = req.query;
+    if (!email || !token) { client.release(); return res.redirect(`${frontendBase}/auth.html?magic_error=invalid`); }
+    const normalizedEmail = String(email).trim().toLowerCase();
+
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `SELECT * FROM auth_codes WHERE email = $1 AND purpose = 'login_magic' AND used_at IS NULL
+       ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
+      [normalizedEmail]
+    );
+    const row = rows[0];
+    if (!row || new Date(row.expires_at) < new Date() || !verifyCode(String(token), row.code_hash)) {
+      await client.query('ROLLBACK'); client.release();
+      return res.redirect(`${frontendBase}/auth.html?magic_error=expired`);
+    }
+    await client.query('UPDATE auth_codes SET used_at = now() WHERE id = $1', [row.id]);
+
+    const { rows: userRows } = await client.query('SELECT * FROM users WHERE email = $1 AND email_verified = TRUE', [normalizedEmail]);
+    if (userRows.length === 0) { await client.query('ROLLBACK'); client.release(); return res.redirect(`${frontendBase}/auth.html?magic_error=expired`); }
+    const user = userRows[0];
+
+    const ban = await checkBan(client, user.id);
+    if (ban) { await client.query('ROLLBACK'); client.release(); return res.redirect(`${frontendBase}/auth.html?magic_error=banned`); }
+
+    const { token: sessionToken, deviceName } = await createSession(client, user.id, req);
+    await client.query('COMMIT');
+    client.release();
+
+    setSessionCookie(res, sessionToken);
+    sendNewDeviceLoginEmail(user.email, {
+      deviceName, ipAddress: req.ip,
+      time: new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }),
+    }).catch((e) => console.error('Не удалось отправить письмо о входе:', e));
+    res.redirect(`${frontendBase}/profile.html`);
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    client.release();
+    console.error('login/magic error:', err);
+    res.redirect(`${frontendBase}/auth.html?magic_error=unknown`);
   }
 });
 
