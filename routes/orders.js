@@ -10,6 +10,7 @@ function toClientOrder(o) {
   return {
     id: o.id,
     uid: o.user_id,
+    orderType: o.order_type || 'site',
     package: o.package,
     siteType: o.site_type,
     siteFormat: o.site_format,
@@ -68,6 +69,26 @@ function toClientOrder(o) {
   };
 }
 
+// Расширенная версия для админки — добавляет внутренние заметки, которые
+// НЕ должны попадать клиенту (в отличие от statusComment). Используется
+// только в admin-роутах, никогда в клиентских (GET /, GET /:id для владельца).
+function toAdminOrder(o) {
+  return { ...toClientOrder(o), adminNotes: o.admin_notes || '' };
+}
+
+// Пишем запись в историю статусов заказа. changedBy = email админа,
+// либо null для системных изменений (напр. вебхук оплаты меняет статус 6→5).
+async function logStatusChange(orderId, status, changedBy) {
+  try {
+    await pool.query(
+      `INSERT INTO order_status_history (order_id, status, changed_by) VALUES ($1,$2,$3)`,
+      [orderId, status, changedBy || null]
+    );
+  } catch (err) {
+    console.error('log status history error:', err);
+  }
+}
+
 // ── GET /api/orders ── список заказов текущего юзера
 router.get('/', requireAuth, async (req, res) => {
   const { rows } = await pool.query(
@@ -82,7 +103,7 @@ router.get('/', requireAuth, async (req, res) => {
 // "admin" за значение параметра :id.
 router.get('/admin/all', requireAdmin, async (req, res) => {
   const { rows } = await pool.query('SELECT * FROM orders ORDER BY created_at DESC');
-  res.json(rows.map(toClientOrder));
+  res.json(rows.map(toAdminOrder));
 });
 
 // ── GET /api/orders/:id ── один заказ (владелец или админ)
@@ -90,26 +111,49 @@ router.get('/:id', requireUserOrService, async (req, res) => {
   const { rows } = await pool.query('SELECT * FROM orders WHERE id = $1', [req.params.id]);
   if (rows.length === 0) return res.status(404).json({ error: 'Заказ не найден' });
   const order = rows[0];
-  if (order.user_id !== req.user.id && req.user.role !== 'admin') {
-    return res.status(403).json({ error: 'Доступ запрещён' });
-  }
-  res.json(toClientOrder(order));
+  const isOwner = order.user_id === req.user.id;
+  const isAdmin = req.user.role === 'admin';
+  if (!isOwner && !isAdmin) return res.status(403).json({ error: 'Доступ запрещён' });
+  res.json(isAdmin ? toAdminOrder(order) : toClientOrder(order));
+});
+
+// ── GET /api/orders/:id/history ── история смены статусов (владелец или админ)
+// Владельцу — только статус+дата (для таймлайна в кабинете), админу — ещё и кто менял.
+router.get('/:id/history', requireUserOrService, async (req, res) => {
+  const { rows: oRows } = await pool.query('SELECT user_id FROM orders WHERE id = $1', [req.params.id]);
+  if (oRows.length === 0) return res.status(404).json({ error: 'Заказ не найден' });
+  const isOwner = oRows[0].user_id === req.user.id;
+  const isAdmin = req.user.role === 'admin';
+  if (!isOwner && !isAdmin) return res.status(403).json({ error: 'Доступ запрещён' });
+
+  const { rows } = await pool.query(
+    `SELECT status, changed_by, created_at FROM order_status_history WHERE order_id = $1 ORDER BY created_at ASC`,
+    [req.params.id]
+  );
+  res.json(rows.map(r => ({
+    status: r.status,
+    changedAt: r.created_at,
+    ...(isAdmin ? { changedBy: r.changed_by } : {}),
+  })));
 });
 
 // ── POST /api/orders ── создать заказ (черновик, status=-1 до оплаты)
 router.post('/', requireAuth, async (req, res) => {
   try {
     const b = req.body;
+    // Тип заказа — явно от фронта ('bot' для трека Telegram-бот/мини-апп),
+    // а не угадывается потом в админке по пустым/заполненным полям.
+    const orderType = b.orderType === 'bot' ? 'bot' : 'site';
     const { rows } = await pool.query(
       `INSERT INTO orders (
-        user_id, client_name, client_email, package, site_type, site_format, pages,
+        user_id, order_type, client_name, client_email, package, site_type, site_format, pages,
         total_price, extras, domain_option, domain_name, promo_code, discount_applied,
         description, goals, content_readiness, references_text, launch_date,
         shop_details, attachments, favicon_data, payment_type, paid_amount, remaining_amount, status
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
       RETURNING *`,
       [
-        req.user.id, req.user.display_name, req.user.email,
+        req.user.id, orderType, req.user.display_name, req.user.email,
         b.package, b.siteType, b.siteFormat, b.pages || null,
         b.totalPrice, JSON.stringify(b.extras || null), b.domainOption || null, b.domainName || null,
         b.promoCode || null, b.discountApplied || 0,
@@ -152,6 +196,7 @@ router.delete('/:id', requireAuth, async (req, res) => {
 // возвратов, обслуживания и т.д. Белый список полей защищает от
 // произвольной записи в колонки, которых нет в этом списке.
 const ADMIN_PATCHABLE_FIELDS = {
+  orderType: 'order_type', adminNotes: 'admin_notes',
   siteUrl: 'site_url', siteDomain: 'site_domain', siteFaviconUrl: 'site_favicon_url',
   sitePages: 'site_pages', siteRepo: 'site_repo', botUsername: 'bot_username', botLink: 'bot_link',
   tariff: 'tariff', statusComment: 'status_comment', startedAt: 'started_at', doneAt: 'done_at',
@@ -181,13 +226,16 @@ router.patch('/:id', requireAdmin, async (req, res) => {
     if (rows.length === 0) return res.status(404).json({ error: 'Заказ не найден' });
     const order = rows[0];
 
+    if (Object.prototype.hasOwnProperty.call(req.body, 'status')) {
+      logStatusChange(order.id, order.status, req.user.email);
+    }
     if (Object.prototype.hasOwnProperty.call(req.body, 'status') && req.body.status === 0) {
       sendNewOrderEmail(order.client_email, {
         orderId: order.id, packageName: order.package, totalPrice: order.total_price,
       }).catch((e) => console.error('Не удалось отправить письмо о заказе:', e));
     }
 
-    res.json(toClientOrder(order));
+    res.json(toAdminOrder(order));
   } catch (err) {
     console.error('admin patch order error:', err);
     res.status(500).json({ error: 'Не удалось обновить заказ' });
@@ -202,6 +250,7 @@ router.patch('/:id/status', requireAdmin, async (req, res) => {
   const { rows } = await pool.query('UPDATE orders SET status = $1 WHERE id = $2 RETURNING *', [status, req.params.id]);
   if (rows.length === 0) return res.status(404).json({ error: 'Заказ не найден' });
   const order = rows[0];
+  logStatusChange(order.id, status, req.user.email);
 
   // Уведомление на почту при переходе в оплаченный статус (0 = принят в работу)
   if (status === 0) {
@@ -212,8 +261,27 @@ router.patch('/:id/status', requireAdmin, async (req, res) => {
     }).catch((e) => console.error('Не удалось отправить письмо о заказе:', e));
   }
 
-  res.json(toClientOrder(order));
+  res.json(toAdminOrder(order));
+});
+
+// ── GET /api/orders/:id/payments ── история платежей по заказу (владелец или админ)
+router.get('/:id/payments', requireUserOrService, async (req, res) => {
+  const { rows: oRows } = await pool.query('SELECT user_id FROM orders WHERE id = $1', [req.params.id]);
+  if (oRows.length === 0) return res.status(404).json({ error: 'Заказ не найден' });
+  const isOwner = oRows[0].user_id === req.user.id;
+  const isAdmin = req.user.role === 'admin';
+  if (!isOwner && !isAdmin) return res.status(403).json({ error: 'Доступ запрещён' });
+
+  const { rows } = await pool.query(
+    `SELECT payment_id, type, amount, created_at FROM payment_events WHERE order_id = $1 ORDER BY created_at DESC`,
+    [req.params.id]
+  );
+  res.json(rows.map(r => ({
+    paymentId: r.payment_id, type: r.type, amount: Number(r.amount), createdAt: r.created_at,
+  })));
 });
 
 module.exports = router;
 module.exports.toClientOrder = toClientOrder;
+module.exports.toAdminOrder = toAdminOrder;
+module.exports.logStatusChange = logStatusChange;
