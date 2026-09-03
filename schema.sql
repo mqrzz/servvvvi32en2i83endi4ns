@@ -99,6 +99,11 @@ CREATE TABLE orders (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id             UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 
+    -- явный тип заказа: 'site' | 'bot' — не угадывается по тексту/пустым полям
+    order_type           TEXT NOT NULL DEFAULT 'site',
+    -- внутренние заметки админа, никогда не уходят клиенту (в отличие от status_comment)
+    admin_notes           TEXT,
+
     -- клиентские данные на момент заказа (снапшот, как было в Firestore)
     client_name         TEXT NOT NULL,
     client_email        TEXT NOT NULL,
@@ -143,6 +148,19 @@ CREATE TABLE orders (
 
 CREATE INDEX idx_orders_user ON orders(user_id);
 CREATE INDEX idx_orders_status ON orders(status);
+CREATE INDEX idx_orders_order_type ON orders(order_type);
+
+-- =====================================================
+-- 4.1 ИСТОРИЯ СМЕНЫ СТАТУСОВ ЗАКАЗА
+-- =====================================================
+CREATE TABLE order_status_history (
+    id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    order_id    UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    status      SMALLINT NOT NULL,
+    changed_by  TEXT,              -- email админа; NULL = системное изменение (напр. вебхук оплаты)
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_order_status_history_order ON order_status_history(order_id, created_at);
 
 -- =====================================================
 -- 5. ТИКЕТЫ ПОДДЕРЖКИ (profile/tickets.html, profile/support.html, admin/tickets.html)
