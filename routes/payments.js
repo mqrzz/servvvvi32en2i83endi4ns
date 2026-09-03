@@ -2,6 +2,7 @@ const express = require('express');
 const pool = require('../db/pool');
 const { requireUserOrService } = require('../middleware/requireAuth');
 const { sendNewOrderEmail } = require('../utils/mailer');
+const { logStatusChange } = require('./orders');
 
 const router = express.Router();
 
@@ -139,6 +140,7 @@ router.post('/webhook', requireWebhookSecret, async (req, res) => {
       if (order.status === -1 && order.promo_code) {
         await client.query(`UPDATE promo_codes SET used_count = used_count + 1 WHERE UPPER(code) = UPPER($1)`, [order.promo_code]);
       }
+      if (order.status === -1) logStatusChange(orderId, 0, null);
     } else if (pType === 'remaining') {
       const totalPaid = Number(order.paid_amount || 0) + outSum;
       await client.query(
@@ -149,6 +151,7 @@ router.post('/webhook', requireWebhookSecret, async (req, res) => {
          WHERE id=$4`,
         [totalPaid, now.toISOString(), outSum, orderId]
       );
+      if (order.status === 6) logStatusChange(orderId, 5, null);
     } else {
       await client.query(
         `UPDATE orders SET paid=TRUE, paid_amount=paid_amount + $1, remaining_amount=0, paid_at=$2,
@@ -164,6 +167,7 @@ router.post('/webhook', requireWebhookSecret, async (req, res) => {
       if (order.status === -1 && order.promo_code) {
         await client.query(`UPDATE promo_codes SET used_count = used_count + 1 WHERE UPPER(code) = UPPER($1)`, [order.promo_code]);
       }
+      if (order.status === -1) logStatusChange(orderId, 0, null);
     }
 
     await client.query('COMMIT');
