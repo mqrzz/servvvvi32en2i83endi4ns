@@ -61,4 +61,22 @@ router.get('/admin/all', requireAdmin, async (req, res) => {
   })));
 });
 
+// ── DELETE /api/users/:id ── полное удаление пользователя (только админ) ──
+// Каскадно (ON DELETE CASCADE в schema.sql) удаляет всё, что на него
+// ссылается: заказы, тикеты+сообщения, заявки на обслуживание, сессии,
+// уведомления, passkeys, привязку к боту. Необратимо.
+router.delete('/:id', requireAdmin, async (req, res) => {
+  if (req.params.id === req.user.id) {
+    return res.status(400).json({ error: 'Нельзя удалить свой собственный аккаунт админа отсюда' });
+  }
+  try {
+    const { rows } = await pool.query('DELETE FROM users WHERE id = $1 RETURNING id', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Пользователь не найден' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('DELETE /users/:id:', err);
+    res.status(500).json({ error: 'Не удалось удалить пользователя' });
+  }
+});
+
 module.exports = router;
