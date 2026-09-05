@@ -191,6 +191,15 @@ router.delete('/:id', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+// ── DELETE /api/orders/admin/:id ── полное удаление заказа в любом статусе (только админ) ──
+// В отличие от DELETE /:id (только свой черновик), это безусловное удаление —
+// используется из панели управления сервером/данными в админке.
+router.delete('/admin/:id', requireAdmin, async (req, res) => {
+  const { rows } = await pool.query(`DELETE FROM orders WHERE id = $1 RETURNING id`, [req.params.id]);
+  if (rows.length === 0) return res.status(404).json({ error: 'Заказ не найден' });
+  res.json({ ok: true });
+});
+
 // ── PATCH /api/orders/:id ── гибкое обновление любых полей (только админ) —
 // используется админкой для статус-комментариев, дат, доставки сайта,
 // возвратов, обслуживания и т.д. Белый список полей защищает от
