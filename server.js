@@ -35,6 +35,8 @@ const usersRoutes = require('./routes/users');
 const paymentsRoutes = require('./routes/payments');
 const botRoutes = require('./routes/bot');
 const statusRoutes = require('./routes/status');
+const enterpriseRoutes = require('./routes/enterprise');
+const systemRoutes = require('./routes/system');
 const statusMonitor = require('./lib/statusMonitor');
 
 const app = express();
@@ -90,6 +92,8 @@ app.use('/api/users', usersRoutes);
 app.use('/api/payments', paymentsRoutes);
 app.use('/api/bot', botRoutes);
 app.use('/api/status', statusRoutes);
+app.use('/api/enterprise', enterpriseRoutes);
+app.use('/api/system', systemRoutes);
 
 // Единый обработчик ошибок — чтобы стектрейсы не улетали на фронт
 app.use((err, req, res, next) => {
