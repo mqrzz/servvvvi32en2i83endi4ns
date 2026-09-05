@@ -219,6 +219,8 @@ module.exports = {
   sendNewOrderEmail,
   sendStatusSubscribedEmail,
   sendIncidentUpdateEmail,
+  sendEnterpriseApplicationAdminEmail,
+  sendEnterpriseApplicationConfirmationEmail,
 };
 
 // ── Статус-страница: подтверждение подписки ──
@@ -266,6 +268,66 @@ async function sendIncidentUpdateEmail(toEmail, { incidentTitle, status, message
     from: process.env.MAIL_FROM,
     to: toEmail,
     subject: `[Antviz Status] ${incidentTitle} — ${label}`,
+    html,
+    attachments: baseAttachments(),
+  });
+}
+
+// ── Заявка на крупный проект / свой сервер (enterprise.html) ──
+// Кому слать уведомление о новой заявке — админский email. Если
+// ADMIN_NOTIFY_EMAIL не задан в .env, письмо просто не отправляется
+// (падать при этом не должно — см. .catch() в routes/enterprise.js).
+async function sendEnterpriseApplicationAdminEmail(a) {
+  if (!process.env.ADMIN_NOTIFY_EMAIL) {
+    console.warn('ADMIN_NOTIFY_EMAIL не задан — письмо о новой enterprise-заявке не отправлено');
+    return;
+  }
+
+  const rfLabel = { yes: 'Только серверы в РФ', no: 'РФ не нужна', no_matter: 'Неважно' }[a.servers_in_rf] || '—';
+
+  const html = wrapEmail({
+    heading: 'Новая заявка: крупный проект / свой сервер',
+    bodyHtml: `
+      <div style="background:#f2f2f4; border-radius:20px; padding:16px 20px; margin:16px 0; font-size:14px; color:#3a3a3e; text-align:left;">
+        <div><b>Имя:</b> ${a.name}${a.company ? ` (${a.company})` : ''}</div>
+        <div><b>Telegram:</b> ${a.telegram_username}</div>
+        <div><b>Email:</b> ${a.email}</div>
+        ${a.phone ? `<div><b>Телефон:</b> ${a.phone}</div>` : ''}
+        <div style="margin-top:8px;"><b>Свой сервер:</b> ${a.own_server ? 'Да' : 'Нет'}</div>
+        <div><b>Серверы в РФ:</b> ${rfLabel}</div>
+        <div><b>Свои лимиты:</b> ${a.custom_limits ? 'Да' : 'Нет'}</div>
+        ${a.expected_load ? `<div><b>Нагрузка:</b> ${a.expected_load}</div>` : ''}
+        ${a.budget ? `<div><b>Бюджет:</b> ${a.budget}</div>` : ''}
+        ${a.timeline ? `<div><b>Сроки:</b> ${a.timeline}</div>` : ''}
+        <div style="margin-top:8px;"><b>Описание:</b><br/>${String(a.description || '').replace(/\n/g, '<br/>')}</div>
+      </div>
+      ${button('Открыть в админке', 'https://antviz.ru/admin/enterprise.html')}
+    `,
+  });
+
+  await transporter.sendMail({
+    from: process.env.MAIL_FROM,
+    to: process.env.ADMIN_NOTIFY_EMAIL,
+    subject: `Новая заявка (крупный проект): ${a.name}`,
+    html,
+    attachments: baseAttachments(),
+  });
+}
+
+// Подтверждение самому заявителю, что заявка принята
+async function sendEnterpriseApplicationConfirmationEmail(toEmail, name) {
+  const html = wrapEmail({
+    heading: 'Заявка получена',
+    bodyHtml: `
+      <p>${name ? name + ', в' : 'В'}аша заявка на крупный проект принята — мы её рассмотрим и напишем в Telegram или на почту в ближайшее время.</p>
+      <p style="margin-top:10px;">Обычно отвечаем в течение рабочего дня.</p>
+    `,
+  });
+
+  await transporter.sendMail({
+    from: process.env.MAIL_FROM,
+    to: toEmail,
+    subject: 'Заявка принята — Antviz',
     html,
     attachments: baseAttachments(),
   });
