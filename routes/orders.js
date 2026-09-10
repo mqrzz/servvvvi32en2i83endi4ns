@@ -290,6 +290,85 @@ router.get('/:id/payments', requireUserOrService, async (req, res) => {
   })));
 });
 
+// ── POST /api/orders/:id/revision ── клиент просит правки, пока заказ на проверке (status=3)
+// Раньше кнопка "Запросить правки" в кабинете была заглушкой (Firebase-era TODO) —
+// эндпоинта не существовало вообще. comment необязателен, если передан — уходит
+// комментарием в статус-историю заказа, чтобы админ видел, что именно просили поправить.
+router.post('/:id/revision', requireAuth, async (req, res) => {
+  try {
+    const { comment } = req.body || {};
+    const { rows } = await pool.query('SELECT * FROM orders WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Заказ не найден' });
+    const order = rows[0];
+    if (order.user_id !== req.user.id) return res.status(403).json({ error: 'Доступ запрещён' });
+    if (order.status !== 3) {
+      return res.status(400).json({ error: 'Запросить правки можно, пока заказ на проверке' });
+    }
+
+    const { rows: updated } = await pool.query(
+      `UPDATE orders SET revision_requested = TRUE, status = 4 WHERE id = $1 RETURNING *`,
+      [req.params.id]
+    );
+    logStatusChange(req.params.id, 4, null);
+    if (comment) {
+      // Свободный текст от клиента храним как первое сообщение в новом тикете
+      // поддержки, привязанном к заказу — так у этого текста уже есть готовое,
+      // рабочее место для просмотра и переписки (не изобретаем отдельное поле).
+      const tClient = await pool.connect();
+      try {
+        await tClient.query('BEGIN');
+        const { rows: tRows } = await tClient.query(
+          `INSERT INTO tickets (user_id, user_name, user_email, topic, subject, order_id, order_label, is_read)
+           VALUES ($1,$2,$3,'revision',$4,$5,$6,TRUE) RETURNING id`,
+          [req.user.id, req.user.display_name, req.user.email, 'Правки по заказу', order.id, order.domain_name || order.package || null]
+        );
+        await tClient.query(
+          `INSERT INTO ticket_messages (ticket_id, sender, text) VALUES ($1,'user',$2)`,
+          [tRows[0].id, String(comment).slice(0, 2000)]
+        );
+        await tClient.query('COMMIT');
+      } catch (e) {
+        await tClient.query('ROLLBACK').catch(() => {});
+        console.error('revision comment ticket error:', e);
+      } finally {
+        tClient.release();
+      }
+    }
+    res.json(toClientOrder(updated[0]));
+  } catch (err) {
+    console.error('request revision error:', err);
+    res.status(500).json({ error: 'Не удалось отправить запрос на правки' });
+  }
+});
+
+// ── POST /api/orders/:id/refund ── клиент запрашивает возврат, пока заказ ещё не в работе (status<2)
+// Раньше кнопка "Запросить возврат" в кабинете тоже была заглушкой — эндпоинта не было.
+router.post('/:id/refund', requireAuth, async (req, res) => {
+  try {
+    const { reason, comment } = req.body || {};
+    const { rows } = await pool.query('SELECT * FROM orders WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Заказ не найден' });
+    const order = rows[0];
+    if (order.user_id !== req.user.id) return res.status(403).json({ error: 'Доступ запрещён' });
+    if ((order.status || 0) >= 2) {
+      return res.status(400).json({ error: 'Возврат уже недоступен для этого заказа' });
+    }
+    if (order.refund_status && !['none', 'rejected'].includes(order.refund_status)) {
+      return res.status(400).json({ error: 'Возврат уже оформляется' });
+    }
+
+    const text = [reason, comment].filter(Boolean).join(': ').slice(0, 2000) || 'Без указания причины';
+    const { rows: updated } = await pool.query(
+      `UPDATE orders SET refund_status = 'requested', refund_comment = $1, refund_requested_at = now() WHERE id = $2 RETURNING *`,
+      [text, req.params.id]
+    );
+    res.json(toClientOrder(updated[0]));
+  } catch (err) {
+    console.error('request refund error:', err);
+    res.status(500).json({ error: 'Не удалось отправить заявку на возврат' });
+  }
+});
+
 module.exports = router;
 module.exports.toClientOrder = toClientOrder;
 module.exports.toAdminOrder = toAdminOrder;
