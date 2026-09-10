@@ -36,6 +36,7 @@ router.post('/', requireAuth, async (req, res) => {
     const order = orderRows[0];
     if (order.user_id !== req.user.id) return res.status(403).json({ error: 'Доступ запрещён' });
     if (order.status !== 5) return res.status(400).json({ error: 'Отзыв можно оставить только на завершённый заказ' });
+    if (order.reviewed) return res.status(400).json({ error: 'Отзыв на этот заказ уже оставлен' });
 
     const { rows } = await pool.query(
       `INSERT INTO reviews (user_id, order_id, stars, text, client_name, client_email)
@@ -46,6 +47,7 @@ router.post('/', requireAuth, async (req, res) => {
 
     res.json(toClient(rows[0]));
   } catch (err) {
+    if (err.code === '23505') return res.status(400).json({ error: 'Отзыв на этот заказ уже оставлен' });
     console.error('create review error:', err);
     res.status(500).json({ error: 'Не удалось отправить отзыв' });
   }
