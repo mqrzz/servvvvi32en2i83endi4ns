@@ -69,11 +69,19 @@ router.post('/', requireAuth, async (req, res) => {
     if (orderRows.length === 0) return res.status(404).json({ error: 'Заказ не найден' });
     if (orderRows[0].user_id !== req.user.id) return res.status(403).json({ error: 'Доступ запрещён' });
 
+    // Разовые (не по подписке) заявки создаются ДО оплаты — платёж идёт вторым
+    // запросом сразу следом. Раньше заявка сразу попадала в очередь со
+    // статусом 'open', неотличимым от уже оплаченной/покрытой подпиской —
+    // админ не мог понять, реально это оплачено или человек просто закрыл
+    // вкладку с оплатой. 'awaiting_payment' переводится в 'open' самим
+    // вебхуком оплаты (routes/payments.js, ветка ticket_once) при успехе.
+    const initialStatus = billing === 'once' ? 'awaiting_payment' : 'open';
+
     const { rows } = await pool.query(
-      `INSERT INTO service_tickets (order_id, user_id, user_name, user_email, title, description, images, order_site_type, order_tariff, order_domain, billing)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+      `INSERT INTO service_tickets (order_id, user_id, user_name, user_email, title, description, images, order_site_type, order_tariff, order_domain, billing, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
       [orderId, req.user.id, req.user.display_name, req.user.email, title, description || null,
-        JSON.stringify(images || null), orderSiteType || null, orderTariff || null, orderDomain || null, billing || null]
+        JSON.stringify(images || null), orderSiteType || null, orderTariff || null, orderDomain || null, billing || null, initialStatus]
     );
     res.json(toClient(rows[0]));
   } catch (err) {
