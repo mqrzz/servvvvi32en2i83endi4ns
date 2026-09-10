@@ -94,6 +94,8 @@ app.use('/api/bot', botRoutes);
 app.use('/api/status', statusRoutes);
 app.use('/api/enterprise', enterpriseRoutes);
 app.use('/api/system', systemRoutes);
+const blogCmsRoutes = require('./routes/blog-cms');
+app.use('/api/blog-cms', blogCmsRoutes);
 
 // Единый обработчик ошибок — чтобы стектрейсы не улетали на фронт
 app.use((err, req, res, next) => {
