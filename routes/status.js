@@ -16,15 +16,7 @@ function isDisposableEmail(email) {
   return domain ? disposableSet.has(domain) : false;
 }
 
-// ── Настоящая проверка капчи на бэкенде (не через сторонний прокси, а
-// напрямую в Cloudflare Turnstile) — без валидного токена подписка не пройдёт.
-// Нужен TURNSTILE_SECRET_KEY в .env (Cloudflare Dashboard -> Turnstile -> сайт -> Secret Key,
-// та же пара, что и sitekey 0x4AAAAAADsZsKfyIeKi6Yr- на фронте).
-// Проверка капчи — через тот же самый Vercel-прокси, что уже используется на
-// логине/регистрации (cloudflarecaptcha900374938.vercel.app), просто вызываем его
-// с бэкенда, а не с фронта — так проверку нельзя обойти правкой JS в браузере.
-// Никакого отдельного секретного ключа на этом сервере не нужно — он уже есть
-// в том Vercel-проекте, ровно как для входа/регистрации.
+// 999
 async function verifyTurnstile(token) {
   if (!token) return false;
   try {
