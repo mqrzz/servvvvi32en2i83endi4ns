@@ -12,6 +12,7 @@ function toClient(p) {
     discountValue: Number(p.discount_value),
     active: p.active,
     usedCount: p.used_count,
+    usageLimit: p.usage_limit,
     expiresAt: p.expires_at,
     forUserId: p.for_user_id,
     createdAt: p.created_at,
@@ -34,6 +35,9 @@ router.get('/:code', requireAuth, async (req, res) => {
   if (promo.expires_at && new Date(promo.expires_at) < new Date()) {
     return res.status(400).json({ error: 'Срок действия истёк' });
   }
+  if (promo.usage_limit != null && promo.used_count >= promo.usage_limit) {
+    return res.status(400).json({ error: 'Лимит использований промокода исчерпан' });
+  }
   if (promo.for_user_id && promo.for_user_id !== req.user.id) {
     return res.status(400).json({ error: 'Этот промокод вам не подходит' });
   }
@@ -44,14 +48,17 @@ router.get('/:code', requireAuth, async (req, res) => {
 // ── POST /api/promo-codes ── создать промокод (только админ)
 router.post('/', requireAdmin, async (req, res) => {
   try {
-    const { code, discountType, discountValue, expiresAt, forUserId } = req.body;
+    const { code, discountType, discountValue, expiresAt, forUserId, usageLimit } = req.body;
     if (!code || !discountType || !discountValue) return res.status(400).json({ error: 'Заполните обязательные поля' });
     if (!['percent', 'fixed'].includes(discountType)) return res.status(400).json({ error: 'Некорректный тип скидки' });
+    if (usageLimit != null && (!Number.isInteger(usageLimit) || usageLimit < 1)) {
+      return res.status(400).json({ error: 'Лимит использований должен быть целым числом больше 0' });
+    }
 
     const { rows } = await pool.query(
-      `INSERT INTO promo_codes (code, discount_type, discount_value, expires_at, for_user_id)
-       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-      [code.trim().toUpperCase(), discountType, discountValue, expiresAt || null, forUserId || null]
+      `INSERT INTO promo_codes (code, discount_type, discount_value, expires_at, for_user_id, usage_limit)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [code.trim().toUpperCase(), discountType, discountValue, expiresAt || null, forUserId || null, usageLimit || null]
     );
     res.json(toClient(rows[0]));
   } catch (err) {
@@ -61,10 +68,22 @@ router.post('/', requireAdmin, async (req, res) => {
   }
 });
 
-// ── PATCH /api/promo-codes/:id ── включить/выключить (только админ)
+// ── PATCH /api/promo-codes/:id ── включить/выключить, изменить лимит (только админ)
 router.patch('/:id', requireAdmin, async (req, res) => {
-  const { active } = req.body;
-  const { rows } = await pool.query('UPDATE promo_codes SET active = $1 WHERE id = $2 RETURNING *', [!!active, req.params.id]);
+  const { active, usageLimit } = req.body;
+  const sets = [];
+  const values = [];
+  let i = 1;
+  if (active !== undefined) { sets.push(`active = $${i++}`); values.push(!!active); }
+  if (usageLimit !== undefined) {
+    if (usageLimit !== null && (!Number.isInteger(usageLimit) || usageLimit < 1)) {
+      return res.status(400).json({ error: 'Лимит использований должен быть целым числом больше 0' });
+    }
+    sets.push(`usage_limit = $${i++}`); values.push(usageLimit);
+  }
+  if (!sets.length) return res.status(400).json({ error: 'Нечего обновлять' });
+  values.push(req.params.id);
+  const { rows } = await pool.query(`UPDATE promo_codes SET ${sets.join(', ')} WHERE id = $${i} RETURNING *`, values);
   if (rows.length === 0) return res.status(404).json({ error: 'Промокод не найден' });
   res.json(toClient(rows[0]));
 });
