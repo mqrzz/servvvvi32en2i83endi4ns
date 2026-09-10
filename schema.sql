@@ -216,7 +216,7 @@ CREATE TABLE service_tickets (
     order_domain    TEXT,
     billing         TEXT, -- 'subscription' и т.д.
     admin_reply     TEXT,
-    status          TEXT NOT NULL DEFAULT 'open', -- 'open' | 'done'
+    status          TEXT NOT NULL DEFAULT 'open', -- 'awaiting_payment' (только для billing='once', до оплаты) | 'open' | 'done'
     rating          TEXT, -- 'up' | 'down', выставляется юзером после завершения
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -264,6 +264,7 @@ CREATE TABLE promo_codes (
     discount_value  NUMERIC(10,2) NOT NULL,
     active          BOOLEAN NOT NULL DEFAULT TRUE,
     used_count      INTEGER NOT NULL DEFAULT 0,
+    usage_limit     INTEGER,           -- NULL = без лимита; иначе промокод перестаёт применяться при used_count >= usage_limit
     expires_at      TIMESTAMPTZ,
     for_user_id     UUID REFERENCES users(id) ON DELETE CASCADE, -- персональный промокод
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -286,7 +287,11 @@ CREATE TABLE reviews (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_reviews_order ON reviews(order_id);
+-- Один отзыв на заказ: без этого два параллельных запроса (двойной клик,
+-- повторная отправка формы) могли проскочить проверку order.reviewed в
+-- приложении и создать два отзыва на один и тот же заказ. Уникальный индекс
+-- также ускоряет обычный поиск по order_id, отдельный обычный индекс не нужен.
+CREATE UNIQUE INDEX idx_reviews_order_unique ON reviews(order_id);
 
 -- =====================================================
 -- Автообновление updated_at
