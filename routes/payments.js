@@ -10,6 +10,13 @@ const router = express.Router();
 // (страница payment_success опрашивает этот роут сразу после возврата с оплаты).
 const RECENT_WINDOW_MS = 10 * 60 * 1000;
 
+// ⚠️ ЦЕНЫ ЗАДУБЛИРОВАНЫ в трёх местах (три разных деплоя): здесь,
+// в mqrz/api/pricing.js (TIER_PRICES/EXTRA_PRICES, формирует сумму при
+// создании платежа) и в order/index.html (TIERS, для отображения клиенту).
+// Поменял цену тут — обязательно поменяй и в тех двух файлах. Значение
+// отсюда используется при пересчёте суммы к зачислению в вебхуке оплаты
+// (recalcOrderTotal ниже) — это финальный источник правды для того, что
+// реально спишется, но расхождение с формой заказа = путаница у клиента.
 const TIER_PRICES = {
   'Старт': 2900, 'Рост': 5900, 'Масштаб': 11900,
   'Простой бот': 4900, 'Бот с оплатой': 9900, 'Mini App': 16900,
@@ -40,7 +47,8 @@ async function recalcOrderTotal(client, order) {
       const p = rows[0];
       const expired = p.expires_at && new Date(p.expires_at) < new Date();
       const wrongUser = p.for_user_id && p.for_user_id !== order.user_id;
-      if (!expired && !wrongUser) {
+      const limitReached = p.usage_limit != null && p.used_count >= p.usage_limit;
+      if (!expired && !wrongUser && !limitReached) {
         discount = p.discount_type === 'percent'
           ? Math.round(running * p.discount_value / 100)
           : Math.min(Number(p.discount_value), running);
@@ -153,15 +161,22 @@ router.post('/webhook', requireWebhookSecret, async (req, res) => {
       );
       if (order.status === 6) logStatusChange(orderId, 5, null);
     } else {
+      // Раньше эта ветка не пересчитывала total_price вообще — сохранённое
+      // при оформлении число (присланное браузером клиента, ничем не
+      // проверенное на этом шаге) так и оставалось в заказе навсегда, даже
+      // если реально было оплачено другое (пересчитанное) значение. Теперь
+      // приводим total_price/paid_amount к реально пересчитанной сумме —
+      // так же, как уже сделано для partial-оплаты выше.
+      const total = await recalcOrderTotal(client, order);
       await client.query(
-        `UPDATE orders SET paid=TRUE, paid_amount=paid_amount + $1, remaining_amount=0, paid_at=$2,
-         last_payment_at=$2, out_sum=$1, status = CASE WHEN status = -1 THEN 0 ELSE status END
-         WHERE id=$3`,
-        [outSum, now.toISOString(), orderId]
+        `UPDATE orders SET total_price=$1, paid=TRUE, paid_amount=$1, remaining_amount=0, paid_at=$2,
+         last_payment_at=$2, out_sum=$3, status = CASE WHEN status = -1 THEN 0 ELSE status END
+         WHERE id=$4`,
+        [total, now.toISOString(), outSum, orderId]
       );
       if (order.status === -1 && order.client_email) {
         sendNewOrderEmail(order.client_email, {
-          orderId: order.id, packageName: order.package, totalPrice: order.total_price, paymentId,
+          orderId: order.id, packageName: order.package, totalPrice: total, paymentId,
         }).catch((e) => console.error('Не удалось отправить письмо о заказе:', e));
       }
       if (order.status === -1 && order.promo_code) {
