@@ -901,6 +901,17 @@ router.post('/delete-account', verifyCodeLimiter, requireAuth, async (req, res) 
     const { code } = req.body;
     if (!code) return res.status(400).json({ error: 'Введите код' });
 
+    // Единственный админ не должен иметь возможность случайно снести себе
+    // админку через обычное самообслуживание в Настройках — админский
+    // DELETE /api/users/:id и так запрещает удалять самого себя, но этот
+    // роут (самостоятельное удаление) той проверки не имел вообще.
+    if (req.user.role === 'admin') {
+      const { rows: adminCountRows } = await pool.query(`SELECT COUNT(*)::int AS n FROM users WHERE role = 'admin'`);
+      if (adminCountRows[0].n <= 1) {
+        return res.status(400).json({ error: 'Нельзя удалить последний админский аккаунт. Сначала назначьте другого админа.' });
+      }
+    }
+
     const { rows: codeRows } = await pool.query(
       `SELECT * FROM auth_codes WHERE email = $1 AND purpose = 'delete_account' AND used_at IS NULL
        ORDER BY created_at DESC LIMIT 1`,
