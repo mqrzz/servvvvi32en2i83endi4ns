@@ -19,4 +19,17 @@ const verifyCodeLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-module.exports = { sendCodeLimiter, verifyCodeLimiter };
+// Не больше 1 заявки на "Крупные проекты" за 3 часа с одного IP — эндпоинт
+// публичный, без авторизации и раньше был вообще без лимита: можно было
+// заспамить и очередь в админке, и почту (каждая заявка триггерит письмо
+// админу и письмо-подтверждение на указанный email — второе ещё и спамило
+// бы чужой ящик, если email в заявке не свой).
+const enterpriseLimiter = rateLimit({
+  windowMs: 3 * 60 * 60 * 1000,
+  max: 1,
+  message: { error: 'Вы уже отправляли заявку недавно. Попробуйте позже или напишите в поддержку.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+module.exports = { sendCodeLimiter, verifyCodeLimiter, enterpriseLimiter };
