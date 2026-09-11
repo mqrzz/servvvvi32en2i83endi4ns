@@ -1,9 +1,18 @@
 const express = require('express');
 const pool = require('../db/pool');
 const { requireAdmin } = require('../middleware/requireAuth');
+const { enterpriseLimiter } = require('../middleware/rateLimiters');
 const { sendEnterpriseApplicationAdminEmail, sendEnterpriseApplicationConfirmationEmail } = require('../utils/mailer');
 
 const router = express.Router();
+
+// Простая, но реальная проверка формата — раньше проверялось только "не пусто",
+// поэтому в поле телефона (input type="tel" не валидирует формат вообще ничем)
+// и в остальные поля можно было прислать что угодно, включая прямой запрос
+// к API в обход формы на сайте.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const PHONE_RE = /^\+?[\d\s\-()]{10,20}$/;
+const TG_RE = /^@?[a-zA-Z]\w{4,31}$/;
 
 function toClient(a) {
   return {
@@ -33,16 +42,26 @@ function toAdmin(a) {
 }
 
 // ── POST /api/enterprise ── публичная форма (без авторизации) ──
-router.post('/', async (req, res) => {
+router.post('/', enterpriseLimiter, async (req, res) => {
   try {
     const b = req.body || {};
     const name = (b.name || '').trim();
     const telegramUsername = (b.telegramUsername || '').trim();
     const email = (b.email || '').trim();
+    const phone = (b.phone || '').trim();
     const description = (b.description || '').trim();
 
     if (!name || !telegramUsername || !email || !description) {
       return res.status(400).json({ error: 'Заполните имя, Telegram, email и описание проекта' });
+    }
+    if (!EMAIL_RE.test(email)) {
+      return res.status(400).json({ error: 'Некорректный email' });
+    }
+    if (!TG_RE.test(telegramUsername)) {
+      return res.status(400).json({ error: 'Некорректный Telegram-username (только буквы, цифры, подчёркивания, 5–32 символа)' });
+    }
+    if (phone && !PHONE_RE.test(phone)) {
+      return res.status(400).json({ error: 'Некорректный номер телефона' });
     }
 
     const serversInRf = ['yes', 'no', 'no_matter'].includes(b.serversInRf) ? b.serversInRf : null;
@@ -54,7 +73,7 @@ router.post('/', async (req, res) => {
       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
       RETURNING *`,
       [
-        name, b.company || null, telegramUsername, email, b.phone || null,
+        name, b.company || null, telegramUsername, email, phone || null,
         b.projectType || null, description,
         !!b.ownServer, serversInRf, !!b.customLimits,
         b.expectedLoad || null, b.budget || null, b.timeline || null,
