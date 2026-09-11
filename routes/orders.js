@@ -2,6 +2,7 @@ const express = require('express');
 const pool = require('../db/pool');
 const { requireAuth, requireAdmin, requireUserOrService } = require('../middleware/requireAuth');
 const { sendNewOrderEmail } = require('../utils/mailer');
+const { recalcOrderTotal } = require('../utils/pricing');
 
 const router = express.Router();
 
@@ -144,6 +145,28 @@ router.post('/', requireAuth, async (req, res) => {
     // Тип заказа — явно от фронта ('bot' для трека Telegram-бот/мини-апп),
     // а не угадывается потом в админке по пустым/заполненным полям.
     const orderType = b.orderType === 'bot' ? 'bot' : 'site';
+
+    // Раньше totalPrice/paidAmount/remainingAmount брались из тела запроса
+    // как есть — то, что посчитал браузер клиента, ничем не проверялось.
+    // При обычном использовании сайта это совпадает с реальной ценой (клиент
+    // считает по тем же тарифам), но: (а) прямой запрос к API мог прислать
+    // любое число, которое потом навсегда оседало в карточке заказа и в
+    // статистике; (б) если что-то успело разъехаться между моментом, когда
+    // клиент в браузере посчитал цену, и моментом отправки формы (истёк
+    // только что применённый промокод и т.п.) — сохранялась именно
+    // клиентская, уже неверная цифра. Теперь считаем totalPrice на сервере
+    // по тем же тарифам/промокоду, что и при оплате (utils/pricing.js) —
+    // так totalPrice/remainingAmount с самого начала совпадают с тем, что
+    // реально спишется при оплате.
+    const { total: totalPrice } = await recalcOrderTotal(pool, {
+      package: b.package,
+      extras: b.extras,
+      promo_code: b.promoCode || null,
+      user_id: req.user.id,
+    });
+    const isHalf = b.paymentType === 'partial';
+    const remainingAmount = isHalf ? Math.max(0, totalPrice - Math.ceil(totalPrice / 2)) : 0;
+
     const { rows } = await pool.query(
       `INSERT INTO orders (
         user_id, order_type, client_name, client_email, package, site_type, site_format, pages,
@@ -155,12 +178,12 @@ router.post('/', requireAuth, async (req, res) => {
       [
         req.user.id, orderType, req.user.display_name, req.user.email,
         b.package, b.siteType, b.siteFormat, b.pages || null,
-        b.totalPrice, JSON.stringify(b.extras || null), b.domainOption || null, b.domainName || null,
+        totalPrice, JSON.stringify(b.extras || null), b.domainOption || null, b.domainName || null,
         b.promoCode || null, b.discountApplied || 0,
         b.description || null, JSON.stringify(b.goals || null), b.contentReadiness || null,
         b.referencesText || null, b.launchDate || null,
         JSON.stringify(b.shopDetails || null), JSON.stringify(b.attachments || null), b.favicon || null,
-        b.paymentType || null, b.paidAmount || 0, b.remainingAmount || 0, -1, // -1 = черновик до оплаты
+        b.paymentType || null, 0, remainingAmount, -1, // -1 = черновик до оплаты; paid_amount всегда 0 на создании — платить ещё не платили
       ]
     );
     const order = rows[0];
