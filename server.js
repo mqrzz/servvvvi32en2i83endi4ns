@@ -46,7 +46,7 @@ const app = express();
 // корректно определяли реальный IP клиента, а не падали с ошибкой.
 app.set('trust proxy', 1);
 
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '30mb' })); // см. order/index.html: вложения к заказу передаются base64 внутри JSON-тела
 app.use(cookieParser());
 app.use(
   cors({
@@ -94,8 +94,6 @@ app.use('/api/bot', botRoutes);
 app.use('/api/status', statusRoutes);
 app.use('/api/enterprise', enterpriseRoutes);
 app.use('/api/system', systemRoutes);
-const blogCmsRoutes = require('./routes/blog-cms');
-app.use('/api/blog-cms', blogCmsRoutes);
 
 // Единый обработчик ошибок — чтобы стектрейсы не улетали на фронт
 app.use((err, req, res, next) => {
