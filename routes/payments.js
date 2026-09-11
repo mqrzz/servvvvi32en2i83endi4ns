@@ -3,60 +3,13 @@ const pool = require('../db/pool');
 const { requireUserOrService } = require('../middleware/requireAuth');
 const { sendNewOrderEmail } = require('../utils/mailer');
 const { logStatusChange } = require('./orders');
+const { recalcOrderTotal } = require('../utils/pricing');
 
 const router = express.Router();
 
 // Окно, в течение которого последний платёж считается "недавним" для /check
 // (страница payment_success опрашивает этот роут сразу после возврата с оплаты).
 const RECENT_WINDOW_MS = 10 * 60 * 1000;
-
-// ⚠️ ЦЕНЫ ЗАДУБЛИРОВАНЫ в трёх местах (три разных деплоя): здесь,
-// в mqrz/api/pricing.js (TIER_PRICES/EXTRA_PRICES, формирует сумму при
-// создании платежа) и в order/index.html (TIERS, для отображения клиенту).
-// Поменял цену тут — обязательно поменяй и в тех двух файлах. Значение
-// отсюда используется при пересчёте суммы к зачислению в вебхуке оплаты
-// (recalcOrderTotal ниже) — это финальный источник правды для того, что
-// реально спишется, но расхождение с формой заказа = путаница у клиента.
-const TIER_PRICES = {
-  'Старт': 2900, 'Рост': 5900, 'Масштаб': 11900,
-  'Простой бот': 4900, 'Бот с оплатой': 9900, 'Mini App': 16900,
-};
-const EXTRA_PRICES = { content: 2000, shop: 4900, bot_pay: 3000, bot_crm: 2500 };
-
-// Пересчитываем сумму заказа заново на момент оплаты (а не доверяем
-// total_price, сохранённому клиентом при оформлении) — если промокод к
-// этому моменту истёк/деактивирован/не для этого юзера, скидка больше не
-// применяется. Без этого клиент мог бы оформить заказ с ещё живым
-// промокодом, потом дождаться его окончания и всё равно доплатить по
-// сниженной цене, посчитанной в момент создания заказа.
-async function recalcOrderTotal(client, order) {
-  const base = TIER_PRICES[order.package];
-  if (base == null) return Number(order.total_price); // неизвестный тариф — не пересчитываем
-  let running = base;
-  const extras = Array.isArray(order.extras) ? order.extras : [];
-  for (const key of Object.keys(EXTRA_PRICES)) if (extras.includes(key)) running += EXTRA_PRICES[key];
-  if (extras.includes('urgent')) running += Math.round(running * 0.3);
-
-  let discount = 0;
-  if (order.promo_code) {
-    const { rows } = await client.query(
-      `SELECT * FROM promo_codes WHERE UPPER(code) = UPPER($1) AND active = TRUE`,
-      [order.promo_code]
-    );
-    if (rows.length) {
-      const p = rows[0];
-      const expired = p.expires_at && new Date(p.expires_at) < new Date();
-      const wrongUser = p.for_user_id && p.for_user_id !== order.user_id;
-      const limitReached = p.usage_limit != null && p.used_count >= p.usage_limit;
-      if (!expired && !wrongUser && !limitReached) {
-        discount = p.discount_type === 'percent'
-          ? Math.round(running * p.discount_value / 100)
-          : Math.min(Number(p.discount_value), running);
-      }
-    }
-  }
-  return Math.max(0, running - discount);
-}
 
 // Простой машинный секрет: вебхук вызывает наш собственный Vercel-код
 // (resultUrl.js), не браузер — там нет "текущего юзера" вообще (ЮКасса
@@ -127,7 +80,7 @@ router.post('/webhook', requireWebhookSecret, async (req, res) => {
       }
       // Разовая правка не трогает финансы самого заказа — это отдельный платёж.
     } else if (pType === 'partial') {
-      const total = await recalcOrderTotal(client, order);
+      const { total } = await recalcOrderTotal(client, order);
       const remaining = Math.max(0, total - outSum);
       await client.query(
         `UPDATE orders SET total_price=$1, paid_amount=$2, remaining_amount=$3, paid_at=$4,
@@ -167,7 +120,7 @@ router.post('/webhook', requireWebhookSecret, async (req, res) => {
       // если реально было оплачено другое (пересчитанное) значение. Теперь
       // приводим total_price/paid_amount к реально пересчитанной сумме —
       // так же, как уже сделано для partial-оплаты выше.
-      const total = await recalcOrderTotal(client, order);
+      const { total } = await recalcOrderTotal(client, order);
       await client.query(
         `UPDATE orders SET total_price=$1, paid=TRUE, paid_amount=$1, remaining_amount=0, paid_at=$2,
          last_payment_at=$2, out_sum=$3, status = CASE WHEN status = -1 THEN 0 ELSE status END
