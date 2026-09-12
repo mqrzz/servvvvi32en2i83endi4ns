@@ -37,6 +37,7 @@ const botRoutes = require('./routes/bot');
 const statusRoutes = require('./routes/status');
 const enterpriseRoutes = require('./routes/enterprise');
 const systemRoutes = require('./routes/system');
+const { checkExpiringSubscriptions } = require('./utils/subscriptionReminders');
 const pricingRoutes = require('./routes/pricing');
 const subscriptionsRoutes = require('./routes/subscriptions');
 const statusMonitor = require('./lib/statusMonitor');
@@ -109,4 +110,11 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Antviz backend запущен на порту ${PORT}`);
   statusMonitor.start(); // реальные самопроверки сервисов для /status, раз в 5 минут
+
+  // П.9: проверка истекающих подписок на обслуживание — раз в 6 часов,
+  // плюс один раз сразу при старте (через минуту, чтобы не мешать
+  // остальной инициализации). Долгоживущий процесс (systemd), поэтому
+  // обычный setInterval, без отдельного cron.
+  setTimeout(() => checkExpiringSubscriptions().catch((e) => console.error('checkExpiringSubscriptions:', e)), 60 * 1000);
+  setInterval(() => checkExpiringSubscriptions().catch((e) => console.error('checkExpiringSubscriptions:', e)), 6 * 60 * 60 * 1000);
 });
