@@ -1,21 +1,36 @@
-// Единый расчёт суммы заказа на бэкенде — используется и при создании
-// заказа (routes/orders.js, чтобы не доверять totalPrice/remainingAmount,
-// присланным браузером клиента), и при пересчёте суммы в момент оплаты
-// (routes/payments.js, recalcOrderTotal). Вынесено в отдельный файл без
-// зависимостей от orders.js/payments.js, чтобы не создавать циклический
-// require между ними.
-//
-// ⚠️ ЦЕНЫ ЗАДУБЛИРОВАНЫ ЕЩЁ В ДВУХ МЕСТАХ (два разных деплоя, общий модуль
-// туда напрямую не подключить): в order/index.html (TIERS, для отображения
-// клиенту на форме заказа) и в mqrz/api/pricing.js (TIER_PRICES/EXTRA_PRICES,
-// формирует сумму при создании платежа через ЮKassa). Поменял цену тут —
-// обязательно поменяй и в тех двух файлах.
-
+// ЕДИНЫЙ источник цен на бэкенде. Раньше эти же числа были захардкожены
+// ЕЩЁ в двух местах (order/index.html и mqrz/api/pricing.js) — из-за этого
+// суммарно и завелась история "показывается одна цена, в ЮKассе другая":
+// каждое место считало сумму заказа заново, своей копией формулы, и любое
+// расхождение (забытая правка цены, протухший на полпути промокод) сразу
+// било по факту оплаты. Теперь так:
+//   - здесь — единственное место, где цены прописаны буквально;
+//   - GET /api/pricing отдаёт эти же числа наружу для отображения
+//     (order/index.html, profile/tickets.html — просто фетчат при загрузке,
+//     ничего не хардкодят);
+//   - POST /api/orders/quote отдаёт точную сумму с учётом промокода —
+//     им можно свериться перед оплатой;
+//   - mqrz/api/createPayment.js для типов order/partial/remaining вообще
+//     больше не пересчитывает сумму сам, а берёт уже сохранённые
+//     totalPrice/paidAmount/remainingAmount заказа (посчитанные один раз
+//     здесь же, при создании заказа в routes/orders.js, и обновляемые
+//     здесь же вебхуком в routes/payments.js) — то есть "показанная" и
+//     "списанная" сумма гарантированно одно и то же число из одного места.
+//   - для support/ticket_once (плоские тарифы без промокода) createPayment
+//     тоже спрашивает актуальные цифры у GET /api/pricing, а не хранит их
+//     у себя.
 const TIER_PRICES = {
   'Старт': 2900, 'Рост': 5900, 'Масштаб': 11900,
   'Простой бот': 4900, 'Бот с оплатой': 9900, 'Mini App': 16900,
 };
 const EXTRA_PRICES = { content: 2000, shop: 4900, bot_pay: 3000, bot_crm: 2500 };
+
+const SUPPORT_TARIFFS = {
+  basic:    { price: 500,  limit: 5 },
+  priority: { price: 1200, limit: 20 },
+};
+const DEFAULT_SUPPORT_TARIFF = 'basic';
+const ONE_OFF_TICKET_PRICE = 350;
 
 // Пересчитываем сумму заново на сервере, а не доверяем тому, что прислал
 // клиент — если промокод к этому моменту истёк/деактивирован/исчерпал лимит,
@@ -55,4 +70,7 @@ async function recalcOrderTotal(client, order) {
   return { total: Math.max(0, running - discount), discount };
 }
 
-module.exports = { TIER_PRICES, EXTRA_PRICES, recalcOrderTotal };
+module.exports = {
+  TIER_PRICES, EXTRA_PRICES, recalcOrderTotal,
+  SUPPORT_TARIFFS, DEFAULT_SUPPORT_TARIFF, ONE_OFF_TICKET_PRICE,
+};
