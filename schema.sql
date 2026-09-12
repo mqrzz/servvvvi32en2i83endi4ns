@@ -215,6 +215,7 @@ CREATE TABLE service_tickets (
     order_tariff    TEXT,
     order_domain    TEXT,
     billing         TEXT, -- 'subscription' и т.д.
+    subscription_id UUID, -- какой период подписки списал эту заявку в счёт лимита (NULL для billing='once'); FK добавлен ниже ALTER'ом, т.к. service_subscriptions объявлена позже в этом файле
     admin_reply     TEXT,
     status          TEXT NOT NULL DEFAULT 'open', -- 'awaiting_payment' (только для billing='once', до оплаты) | 'open' | 'done'
     rating          TEXT, -- 'up' | 'down', выставляется юзером после завершения
@@ -224,6 +225,53 @@ CREATE TABLE service_tickets (
 
 CREATE INDEX idx_service_tickets_order ON service_tickets(order_id);
 CREATE INDEX idx_service_tickets_user ON service_tickets(user_id);
+
+-- 5c. Подписка на обслуживание сайта (одна активная на заказ).
+-- Раньше это было 4 колонки прямо на orders (support_active/support_tariff/
+-- support_started_at/support_expires_at) — снепшот без истории продлений,
+-- и лимит заявок в месяц вообще не проверялся на бэке: только в JS на
+-- фронте (profile/tickets.html), т.е. по факту был обходим прямым вызовом
+-- API. tickets_used теперь считает и проверяет сервер (routes/service-
+-- tickets.js), а не клиент.
+CREATE TABLE service_subscriptions (
+    id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    order_id            UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    user_id             UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    tariff              TEXT NOT NULL, -- 'basic' | 'priority'
+    status              TEXT NOT NULL DEFAULT 'active', -- 'active' | 'expired' | 'canceled'
+    period_start        TIMESTAMPTZ NOT NULL,
+    period_end          TIMESTAMPTZ NOT NULL,
+    tickets_used        INT NOT NULL DEFAULT 0, -- сбрасывается на 0 при каждом продлении (новый период)
+    auto_renew          BOOLEAN NOT NULL DEFAULT FALSE,
+    expiry_notified_at  TIMESTAMPTZ, -- чтобы не слать напоминание об истечении повторно
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Один заказ — одна (текущая) подписка на обслуживание. История продлений
+-- живёт в subscription_renewals ниже, а не в отдельных строках здесь.
+CREATE UNIQUE INDEX idx_service_subscriptions_order ON service_subscriptions(order_id);
+CREATE INDEX idx_service_subscriptions_user ON service_subscriptions(user_id);
+
+-- 5d. История продлений — раньше нигде не хранилась: сколько раз продлевали,
+-- по какому тарифу и когда, было видно только по последнему снепшоту в
+-- orders (одно число, без истории).
+CREATE TABLE subscription_renewals (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    subscription_id UUID NOT NULL REFERENCES service_subscriptions(id) ON DELETE CASCADE,
+    tariff          TEXT NOT NULL,
+    amount          NUMERIC(10,2) NOT NULL,
+    period_start    TIMESTAMPTZ NOT NULL,
+    period_end      TIMESTAMPTZ NOT NULL,
+    paid_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_subscription_renewals_sub ON subscription_renewals(subscription_id);
+
+ALTER TABLE service_tickets
+  ADD CONSTRAINT fk_service_tickets_subscription
+  FOREIGN KEY (subscription_id) REFERENCES service_subscriptions(id) ON DELETE SET NULL;
+CREATE INDEX idx_service_tickets_subscription ON service_tickets(subscription_id);
 
 -- =====================================================
 -- 6. УВЕДОМЛЕНИЯ (profile/notifications.html)
@@ -311,4 +359,6 @@ CREATE TRIGGER trg_orders_updated BEFORE UPDATE ON orders
 CREATE TRIGGER trg_tickets_updated BEFORE UPDATE ON tickets
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 CREATE TRIGGER trg_service_tickets_updated BEFORE UPDATE ON service_tickets
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE TRIGGER trg_service_subscriptions_updated BEFORE UPDATE ON service_subscriptions
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
