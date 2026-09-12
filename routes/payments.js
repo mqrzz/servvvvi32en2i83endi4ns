@@ -3,7 +3,7 @@ const pool = require('../db/pool');
 const { requireUserOrService } = require('../middleware/requireAuth');
 const { sendNewOrderEmail } = require('../utils/mailer');
 const { logStatusChange } = require('./orders');
-const { recalcOrderTotal } = require('../utils/pricing');
+const { grantOrRenewSubscription } = require('../utils/subscriptions');
 
 const router = express.Router();
 
@@ -62,14 +62,26 @@ router.post('/webhook', requireWebhookSecret, async (req, res) => {
 
     if (pType === 'support') {
       const tariffKey = ['basic', 'priority'].includes(supportTariff) ? supportTariff : 'basic';
-      const currentExpiry = order.support_expires_at ? new Date(order.support_expires_at) : null;
-      const base = currentExpiry && currentExpiry > now ? currentExpiry : now;
-      const newExpiry = new Date(base.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+      // Раньше это была одна UPDATE на orders (support_active/support_tariff/
+      // support_expires_at) — снепшот без истории, и лимит заявок в месяц
+      // нигде на бэке не считался (только в JS фронта, обходится прямым
+      // вызовом API). Теперь ведём отдельную запись подписки + журнал
+      // продлений через общий helper (см. utils/subscriptions.js — тем же
+      // кодом пользуется и ручная выдача админом), лимит проверяет сервер
+      // (routes/service-tickets.js).
+      const { periodEnd } = await grantOrRenewSubscription(client, {
+        orderId, userId: order.user_id, tariff: tariffKey, amount: outSum, now,
+      });
+
+      // Кэш на orders.support_* оставляем актуальным — админка и бейджи
+      // сайдбара пока читают эти колонки напрямую, переводить их на
+      // service_subscriptions отдельным заходом.
       await client.query(
         `UPDATE orders SET support_active=TRUE, support_started_at=COALESCE(support_started_at,$1),
          support_expires_at=$2, support_tariff=$3, support_requested=FALSE,
          last_payment_at=$1, out_sum=$4 WHERE id=$5`,
-        [now.toISOString(), newExpiry.toISOString(), tariffKey, outSum, orderId]
+        [now.toISOString(), periodEnd.toISOString(), tariffKey, outSum, orderId]
       );
     } else if (pType === 'ticket_once') {
       if (ticketId) {
@@ -80,7 +92,14 @@ router.post('/webhook', requireWebhookSecret, async (req, res) => {
       }
       // Разовая правка не трогает финансы самого заказа — это отдельный платёж.
     } else if (pType === 'partial') {
-      const { total } = await recalcOrderTotal(client, order);
+      // total_price уже посчитан один раз при создании заказа, и outSum
+      // (сумма первой части, реально подтверждённая ЮKассой) — это ровно
+      // половина того числа. Пересчитывать заново (тариф+допы+промокод)
+      // здесь больше не нужно — наоборот, опасно: между созданием заказа
+      // и подтверждением оплаты промокод может успеть протухнуть, и
+      // повторный пересчёт задним числом изменит total_price на то, чего
+      // пользователь не видел и не платил.
+      const total = Number(order.total_price) || outSum;
       const remaining = Math.max(0, total - outSum);
       await client.query(
         `UPDATE orders SET total_price=$1, paid_amount=$2, remaining_amount=$3, paid_at=$4,
@@ -114,13 +133,13 @@ router.post('/webhook', requireWebhookSecret, async (req, res) => {
       );
       if (order.status === 6) logStatusChange(orderId, 5, null);
     } else {
-      // Раньше эта ветка не пересчитывала total_price вообще — сохранённое
-      // при оформлении число (присланное браузером клиента, ничем не
-      // проверенное на этом шаге) так и оставалось в заказе навсегда, даже
-      // если реально было оплачено другое (пересчитанное) значение. Теперь
-      // приводим total_price/paid_amount к реально пересчитанной сумме —
-      // так же, как уже сделано для partial-оплаты выше.
-      const { total } = await recalcOrderTotal(client, order);
+      // Как и в partial-ветке: total_price уже посчитан один раз при
+      // создании заказа (routes/orders.js), и именно от него createPayment
+      // взял сумму к оплате — так что outSum и total_price должны совпадать
+      // по построению. Берём total_price как есть, с фолбэком на outSum
+      // (реально подтверждённая ЮKассой сумма) для старых заказов, где
+      // total_price мог быть не выставлен.
+      const total = Number(order.total_price) || outSum;
       await client.query(
         `UPDATE orders SET total_price=$1, paid=TRUE, paid_amount=$1, remaining_amount=0, paid_at=$2,
          last_payment_at=$2, out_sum=$3, status = CASE WHEN status = -1 THEN 0 ELSE status END
