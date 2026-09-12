@@ -1,6 +1,6 @@
 const express = require('express');
 const pool = require('../db/pool');
-const { requireAdmin } = require('../middleware/requireAuth');
+const { requireAdmin, optionalAuth, requireAuth } = require('../middleware/requireAuth');
 const { enterpriseLimiter } = require('../middleware/rateLimiters');
 const { sendEnterpriseApplicationAdminEmail, sendEnterpriseApplicationConfirmationEmail } = require('../utils/mailer');
 
@@ -41,8 +41,13 @@ function toAdmin(a) {
   return { ...toClient(a), adminNotes: a.admin_notes || '' };
 }
 
-// ── POST /api/enterprise ── публичная форма (без авторизации) ──
-router.post('/', enterpriseLimiter, async (req, res) => {
+// ── POST /api/enterprise ── публичная форма (доступна и без входа в аккаунт) ──
+// Раньше заявка ни с чем не была связана — если человек уже вошёл в
+// личный кабинет и оттуда же подал заявку, узнать статус потом можно было
+// только через переписку, кабинет об этой заявке вообще не знал. Теперь,
+// если в запросе есть действующая cookie сессии, заявка привязывается к
+// аккаунту (optionalAuth не требует входа — анонимная подача работает как раньше).
+router.post('/', enterpriseLimiter, optionalAuth, async (req, res) => {
   try {
     const b = req.body || {};
     const name = (b.name || '').trim();
@@ -69,14 +74,15 @@ router.post('/', enterpriseLimiter, async (req, res) => {
     const { rows } = await pool.query(
       `INSERT INTO enterprise_applications (
         name, company, telegram_username, email, phone, project_type, description,
-        own_server, servers_in_rf, custom_limits, expected_load, budget, timeline
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        own_server, servers_in_rf, custom_limits, expected_load, budget, timeline, user_id
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
       RETURNING *`,
       [
         name, b.company || null, telegramUsername, email, phone || null,
         b.projectType || null, description,
         !!b.ownServer, serversInRf, !!b.customLimits,
         b.expectedLoad || null, b.budget || null, b.timeline || null,
+        req.user ? req.user.id : null,
       ]
     );
     const application = rows[0];
@@ -96,6 +102,15 @@ router.post('/', enterpriseLimiter, async (req, res) => {
     console.error('create enterprise application error:', err);
     res.status(500).json({ error: 'Не удалось отправить заявку, попробуйте ещё раз' });
   }
+});
+
+// ── GET /api/enterprise/mine ── заявки текущего пользователя (для кабинета) ──
+router.get('/mine', requireAuth, async (req, res) => {
+  const { rows } = await pool.query(
+    'SELECT * FROM enterprise_applications WHERE user_id = $1 ORDER BY created_at DESC',
+    [req.user.id]
+  );
+  res.json(rows.map(toClient));
 });
 
 // ── GET /api/enterprise/admin/all ── все заявки (только админ) ──
