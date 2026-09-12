@@ -88,4 +88,28 @@ async function requireUserOrService(req, res, next) {
   next();
 }
 
-module.exports = { requireAuth, requireAdmin, requireUserOrService };
+// Как requireAuth, но не отклоняет запрос при отсутствии/недействительности
+// cookie — просто продолжает без req.user. Нужно для эндпоинтов, доступных
+// и анонимно, и авторизованно (публичная форма заявки от крупного клиента:
+// если человек уже вошёл в аккаунт, привязываем заявку к нему, чтобы потом
+// показать статус в личном кабинете; если нет — заявка всё равно принимается).
+async function optionalAuth(req, res, next) {
+  const token = req.cookies?.session;
+  if (!token) return next();
+  const payload = verifySessionToken(token);
+  if (!payload) return next();
+  try {
+    const { rows } = await pool.query(
+      `SELECT u.id, u.email, u.display_name, u.role
+       FROM sessions s JOIN users u ON u.id = s.user_id
+       WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now()`,
+      [hashToken(token)]
+    );
+    if (rows.length) req.user = rows[0];
+  } catch (err) {
+    console.error('optionalAuth: ошибка проверки сессии (продолжаем анонимно):', err);
+  }
+  next();
+}
+
+module.exports = { requireAuth, requireAdmin, requireUserOrService, optionalAuth };
