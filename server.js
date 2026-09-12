@@ -37,6 +37,8 @@ const botRoutes = require('./routes/bot');
 const statusRoutes = require('./routes/status');
 const enterpriseRoutes = require('./routes/enterprise');
 const systemRoutes = require('./routes/system');
+const pricingRoutes = require('./routes/pricing');
+const subscriptionsRoutes = require('./routes/subscriptions');
 const statusMonitor = require('./lib/statusMonitor');
 
 const app = express();
@@ -94,6 +96,8 @@ app.use('/api/bot', botRoutes);
 app.use('/api/status', statusRoutes);
 app.use('/api/enterprise', enterpriseRoutes);
 app.use('/api/system', systemRoutes);
+app.use('/api/pricing', pricingRoutes);
+app.use('/api/subscriptions', subscriptionsRoutes);
 
 // Единый обработчик ошибок — чтобы стектрейсы не улетали на фронт
 app.use((err, req, res, next) => {
