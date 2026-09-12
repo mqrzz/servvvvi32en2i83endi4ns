@@ -1,6 +1,7 @@
 const express = require('express');
 const pool = require('../db/pool');
 const { requireAuth, requireAdmin, requireUserOrService } = require('../middleware/requireAuth');
+const { SUPPORT_TARIFFS, DEFAULT_SUPPORT_TARIFF } = require('../utils/pricing');
 
 const router = express.Router();
 
@@ -17,6 +18,7 @@ function toClient(t) {
     orderTariff: t.order_tariff,
     orderDomain: t.order_domain,
     billing: t.billing,
+    subscriptionId: t.subscription_id,
     adminReply: t.admin_reply,
     status: t.status,
     rating: t.rating,
@@ -59,34 +61,85 @@ router.get('/:id', requireUserOrService, async (req, res) => {
 });
 
 // ── POST /api/service-tickets ── создать заявку на доработку
+//
+// Раньше billing ('subscription' | 'once') присылал клиент, и сервер ему
+// просто верил: заявка с billing='subscription' сразу уходила в очередь
+// со статусом 'open' без всякой оплаты и без проверки, есть ли у заказа
+// вообще активная подписка. Плюс лимит заявок в месяц ("5 из 5") проверялся
+// только в JS на фронте (profile/tickets.html) — реальный API количество
+// никак не считал. Итог: имея токен, можно было создавать неограниченное
+// число бесплатных заявок, просто присылая нужный billing руками.
+//
+// Теперь billing целиком решает сервер:
+//  - есть активная подписка (service_subscriptions, status='active',
+//    period_end > now) и tickets_used < лимита тарифа → списываем заявку
+//    в счёт подписки (billing='subscription', сразу 'open'), атомарно
+//    инкрементируя tickets_used, чтобы гонка параллельных запросов не дала
+//    провести больше заявок, чем позволяет лимит;
+//  - активной подписки нет ИЛИ лимит на этот период исчерпан → заявка
+//    создаётся как billing='once', status='awaiting_payment' — платёж
+//    (mqrz createPayment, type=ticket_once) переводит её в 'open' сам.
 router.post('/', requireAuth, async (req, res) => {
+  const client = await pool.connect();
   try {
-    const { orderId, title, description, images, orderSiteType, orderTariff, orderDomain, billing } = req.body;
+    const { orderId, title, description, images, orderSiteType, orderTariff, orderDomain } = req.body;
     if (!orderId || !title) return res.status(400).json({ error: 'Заполните обязательные поля' });
 
-    // Проверяем, что заказ реально принадлежит этому юзеру
-    const { rows: orderRows } = await pool.query('SELECT user_id FROM orders WHERE id = $1', [orderId]);
-    if (orderRows.length === 0) return res.status(404).json({ error: 'Заказ не найден' });
-    if (orderRows[0].user_id !== req.user.id) return res.status(403).json({ error: 'Доступ запрещён' });
+    await client.query('BEGIN');
 
-    // Разовые (не по подписке) заявки создаются ДО оплаты — платёж идёт вторым
-    // запросом сразу следом. Раньше заявка сразу попадала в очередь со
-    // статусом 'open', неотличимым от уже оплаченной/покрытой подпиской —
-    // админ не мог понять, реально это оплачено или человек просто закрыл
-    // вкладку с оплатой. 'awaiting_payment' переводится в 'open' самим
-    // вебхуком оплаты (routes/payments.js, ветка ticket_once) при успехе.
-    const initialStatus = billing === 'once' ? 'awaiting_payment' : 'open';
+    const { rows: orderRows } = await client.query('SELECT user_id FROM orders WHERE id = $1', [orderId]);
+    if (orderRows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Заказ не найден' });
+    }
+    if (orderRows[0].user_id !== req.user.id) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Доступ запрещён' });
+    }
 
-    const { rows } = await pool.query(
-      `INSERT INTO service_tickets (order_id, user_id, user_name, user_email, title, description, images, order_site_type, order_tariff, order_domain, billing, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
-      [orderId, req.user.id, req.user.display_name, req.user.email, title, description || null,
-        JSON.stringify(images || null), orderSiteType || null, orderTariff || null, orderDomain || null, billing || null, initialStatus]
+    let billing = 'once';
+    let subscriptionId = null;
+    let initialStatus = 'awaiting_payment';
+
+    const { rows: subRows } = await client.query(
+      `SELECT * FROM service_subscriptions WHERE order_id = $1 AND status = 'active' AND period_end > now() FOR UPDATE`,
+      [orderId]
     );
-    res.json(toClient(rows[0]));
+    const sub = subRows[0] || null;
+
+    if (sub) {
+      const limit = (SUPPORT_TARIFFS[sub.tariff] || SUPPORT_TARIFFS[DEFAULT_SUPPORT_TARIFF]).limit;
+      if (sub.tickets_used < limit) {
+        const { rows: updated } = await client.query(
+          `UPDATE service_subscriptions SET tickets_used = tickets_used + 1
+           WHERE id = $1 AND tickets_used < $2 RETURNING id`,
+          [sub.id, limit]
+        );
+        if (updated.length > 0) {
+          billing = 'subscription';
+          subscriptionId = sub.id;
+          initialStatus = 'open';
+        }
+        // updated.length === 0 значит лимит исчерпал кто-то параллельно между
+        // SELECT и UPDATE — падаем обратно на billing='once', это ожидаемо.
+      }
+    }
+
+    const { rows } = await client.query(
+      `INSERT INTO service_tickets (order_id, user_id, user_name, user_email, title, description, images, order_site_type, order_tariff, order_domain, billing, subscription_id, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+      [orderId, req.user.id, req.user.display_name, req.user.email, title, description || null,
+        JSON.stringify(images || null), orderSiteType || null, orderTariff || null, orderDomain || null,
+        billing, subscriptionId, initialStatus]
+    );
+    await client.query('COMMIT');
+    res.json({ ...toClient(rows[0]), quotaExceeded: billing === 'once' && !!sub });
   } catch (err) {
+    await client.query('ROLLBACK');
     console.error('create service ticket error:', err);
     res.status(500).json({ error: 'Не удалось отправить заявку' });
+  } finally {
+    client.release();
   }
 });
 
