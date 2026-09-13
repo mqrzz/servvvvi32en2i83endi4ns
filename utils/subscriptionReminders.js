@@ -8,6 +8,7 @@
 // кого Telegram не привязан — это не ошибка).
 const pool = require('../db/pool');
 const { notifyTelegram } = require('./notifyTelegram');
+const { pruneOldNotifications } = require('./notifications');
 
 const WARNING_WINDOW_DAYS = 3;
 
@@ -39,6 +40,7 @@ async function checkExpiringSubscriptions() {
         'INSERT INTO notifications (user_id, title, text) VALUES ($1,$2,$3)',
         [s.user_id, title, text]
       );
+      await pruneOldNotifications(s.user_id);
       await pool.query(
         'UPDATE service_subscriptions SET expiry_notified_at = now() WHERE id = $1',
         [s.id]
