@@ -2,6 +2,7 @@ const express = require('express');
 const pool = require('../db/pool');
 const { requireAuth, requireAdmin } = require('../middleware/requireAuth');
 const { notifyTelegram } = require('../utils/notifyTelegram');
+const { pruneOldNotifications, KEEP_LAST } = require('../utils/notifications');
 
 const router = express.Router();
 
@@ -15,11 +16,13 @@ function toClient(n) {
   };
 }
 
-// ── GET /api/notifications ── список своих уведомлений (последние 100)
+// ── GET /api/notifications ── список своих уведомлений (храним только
+// последние 10 на пользователя — старые реально удаляются, см.
+// utils/notifications.js)
 router.get('/', requireAuth, async (req, res) => {
   const { rows } = await pool.query(
-    `SELECT * FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 100`,
-    [req.user.id]
+    `SELECT * FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2`,
+    [req.user.id, KEEP_LAST]
   );
   res.json(rows.map(toClient));
 });
@@ -62,6 +65,7 @@ router.post('/broadcast', requireAdmin, async (req, res) => {
     const values = userIds.map((_, i) => `($${i * 3 + 1}, $${i * 3 + 2}, $${i * 3 + 3})`).join(',');
     const params = userIds.flatMap(id => [id, title, text]);
     await pool.query(`INSERT INTO notifications (user_id, title, text) VALUES ${values}`, params);
+    await Promise.all(userIds.map((id) => pruneOldNotifications(id).catch((e) => console.error('pruneOldNotifications:', e))));
 
     // Тем, у кого привязан Telegram — дублируем в бота (без await каждого:
     // рассылка на 100+ юзеров не должна ждать 100 последовательных запросов
