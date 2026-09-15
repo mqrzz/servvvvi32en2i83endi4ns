@@ -213,6 +213,7 @@ async function sendNewOrderEmail(toEmail, { orderId, packageName, totalPrice, pa
 }
 
 module.exports = {
+  transporter, // используется routes/inbound-email.js для ответов из почты поддержки (с вложениями/заголовками треда)
   sendCodeEmail,
   sendNewDeviceLoginEmail,
   sendAccountDeletedEmail,
