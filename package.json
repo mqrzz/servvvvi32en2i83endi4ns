@@ -9,6 +9,7 @@
     "dev": "node --watch server.js"
   },
   "dependencies": {
+    "@octokit/rest": "^18.12.0",
     "@simplewebauthn/server": "^11.0.0",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.5",
