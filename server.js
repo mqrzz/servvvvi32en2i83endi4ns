@@ -38,6 +38,7 @@ const statusRoutes = require('./routes/status');
 const enterpriseRoutes = require('./routes/enterprise');
 const systemRoutes = require('./routes/system');
 const { checkExpiringSubscriptions } = require('./utils/subscriptionReminders');
+const { cleanupOldSupportEmails } = require('./utils/emailCleanup');
 const pricingRoutes = require('./routes/pricing');
 const subscriptionsRoutes = require('./routes/subscriptions');
 const inboundEmailRoutes = require('./routes/inbound-email');
@@ -121,4 +122,9 @@ app.listen(PORT, () => {
   // обычный setInterval, без отдельного cron.
   setTimeout(() => checkExpiringSubscriptions().catch((e) => console.error('checkExpiringSubscriptions:', e)), 60 * 1000);
   setInterval(() => checkExpiringSubscriptions().catch((e) => console.error('checkExpiringSubscriptions:', e)), 6 * 60 * 60 * 1000);
+
+  // Автоочистка почты поддержки — письма старше 2 месяцев (см. utils/emailCleanup.js).
+  // Раз в сутки достаточно для такого окна.
+  setTimeout(() => cleanupOldSupportEmails().catch((e) => console.error('cleanupOldSupportEmails:', e)), 90 * 1000);
+  setInterval(() => cleanupOldSupportEmails().catch((e) => console.error('cleanupOldSupportEmails:', e)), 24 * 60 * 60 * 1000);
 });
