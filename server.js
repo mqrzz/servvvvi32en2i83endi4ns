@@ -40,6 +40,8 @@ const systemRoutes = require('./routes/system');
 const { checkExpiringSubscriptions } = require('./utils/subscriptionReminders');
 const pricingRoutes = require('./routes/pricing');
 const subscriptionsRoutes = require('./routes/subscriptions');
+const inboundEmailRoutes = require('./routes/inbound-email');
+const emailTemplatesRoutes = require('./routes/email-templates');
 const statusMonitor = require('./lib/statusMonitor');
 
 const app = express();
@@ -99,6 +101,8 @@ app.use('/api/enterprise', enterpriseRoutes);
 app.use('/api/system', systemRoutes);
 app.use('/api/pricing', pricingRoutes);
 app.use('/api/subscriptions', subscriptionsRoutes);
+app.use('/api/inbound-email', inboundEmailRoutes);
+app.use('/api/email-templates', emailTemplatesRoutes);
 
 // Единый обработчик ошибок — чтобы стектрейсы не улетали на фронт
 app.use((err, req, res, next) => {
