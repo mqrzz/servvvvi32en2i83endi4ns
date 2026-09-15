@@ -214,6 +214,8 @@ async function sendNewOrderEmail(toEmail, { orderId, packageName, totalPrice, pa
 
 module.exports = {
   transporter, // используется routes/inbound-email.js для ответов из почты поддержки (с вложениями/заголовками треда)
+  wrapEmail, // фирменный каркас письма (лого, соцсети, футер) — используется и для ответов из почты поддержки
+  baseAttachments, // cid-вложения (лого+иконки соцсетей), нужные, чтобы wrapEmail() отрисовался с картинками
   sendCodeEmail,
   sendNewDeviceLoginEmail,
   sendAccountDeletedEmail,
