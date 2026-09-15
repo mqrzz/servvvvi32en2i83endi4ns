@@ -1,7 +1,7 @@
 const express = require('express');
 const pool = require('../db/pool');
 const { requireAdmin } = require('../middleware/requireAuth');
-const { transporter } = require('../utils/mailer');
+const { transporter, wrapEmail, baseAttachments } = require('../utils/mailer');
 
 const router = express.Router();
 
@@ -174,13 +174,17 @@ router.post('/threads/:key/reply', requireAdmin, wrap(async (req, res) => {
   if (!EMAIL_RE.test(toEmail)) return res.status(400).json({ error: 'Некорректный получатель' });
 
   const fromAddr = process.env.SUPPORT_MAIL_FROM || process.env.MAIL_FROM;
+  const sendSubject = subject || `Re: ${(lastIn && lastIn.subject) || ''}`.trim();
   const info = await transporter.sendMail({
     from: fromAddr,
     to: toEmail,
-    subject: subject || `Re: ${(lastIn && lastIn.subject) || ''}`.trim(),
-    html: bodyHtml || undefined,
+    subject: sendSubject,
+    // Фирменный каркас (лого, соцсети, футер) — тот же, что и у остальных писем
+    // Antviz. В базе/на экране админки хранится и показывается обычный
+    // bodyHtml без брендинга (ниже, в INSERT) — обёртка нужна только на отправке.
+    html: wrapEmail({ heading: sendSubject || 'Ответ от Antviz', bodyHtml: bodyHtml || (b.bodyText || '').replace(/\n/g, '<br/>') }),
     text: b.bodyText || undefined,
-    attachments: buildAttachmentsForSend(attachments),
+    attachments: [...baseAttachments(), ...buildAttachmentsForSend(attachments)],
     inReplyTo: lastIn && lastIn.message_id ? lastIn.message_id : undefined,
     references: lastIn && lastIn.message_id ? lastIn.message_id : undefined,
   });
@@ -193,7 +197,7 @@ router.post('/threads/:key/reply', requireAdmin, wrap(async (req, res) => {
     RETURNING *`,
     [
       key, info.messageId || null, lastIn ? lastIn.message_id : null, fromAddr, null,
-      toEmail, subject || `Re: ${(lastIn && lastIn.subject) || ''}`.trim(),
+      toEmail, sendSubject,
       bodyHtml || null, b.bodyText || null, JSON.stringify(attachments),
       req.user.id, b.templateId || null,
     ]
@@ -222,9 +226,9 @@ router.post('/compose', requireAdmin, wrap(async (req, res) => {
     from: fromAddr,
     to: toEmail,
     subject,
-    html: bodyHtml || undefined,
+    html: wrapEmail({ heading: subject, bodyHtml: bodyHtml || (b.bodyText || '').replace(/\n/g, '<br/>') }),
     text: b.bodyText || undefined,
-    attachments: buildAttachmentsForSend(attachments),
+    attachments: [...baseAttachments(), ...buildAttachmentsForSend(attachments)],
   });
 
   const { rows } = await pool.query(
