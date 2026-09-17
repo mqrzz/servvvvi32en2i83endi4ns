@@ -40,6 +40,7 @@ const systemRoutes = require('./routes/system');
 const blogCmsRoutes = require('./routes/blog-cms');
 const { checkExpiringSubscriptions } = require('./utils/subscriptionReminders');
 const { cleanupOldSupportEmails } = require('./utils/emailCleanup');
+const { runBlogAutoPublish } = require('./utils/blogAutoPublish');
 const pricingRoutes = require('./routes/pricing');
 const subscriptionsRoutes = require('./routes/subscriptions');
 const inboundEmailRoutes = require('./routes/inbound-email');
@@ -129,4 +130,9 @@ app.listen(PORT, () => {
   // Раз в сутки достаточно для такого окна.
   setTimeout(() => cleanupOldSupportEmails().catch((e) => console.error('cleanupOldSupportEmails:', e)), 90 * 1000);
   setInterval(() => cleanupOldSupportEmails().catch((e) => console.error('cleanupOldSupportEmails:', e)), 24 * 60 * 60 * 1000);
+
+  // Автопубликация запланированных черновиков блога (routes/blog-cms.js).
+  // Каждые 3 часа достаточно — дата публикации без привязки к часам.
+  setTimeout(() => runBlogAutoPublish(), 120 * 1000);
+  setInterval(() => runBlogAutoPublish(), 3 * 60 * 60 * 1000);
 });
