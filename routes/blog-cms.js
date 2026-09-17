@@ -4,10 +4,6 @@ const { requireAdmin } = require('../middleware/requireAuth');
 
 const router = express.Router();
 
-// ── Настройка GitHub-клиента ──
-// GITHUB_TOKEN — fine-grained PAT с правами Contents: Read and write на репозиторий блога.
-// GITHUB_BLOG_REPO — "owner/repo", например "mqrzz/bloggggg2weefgwe".
-// GITHUB_BLOG_BRANCH — обычно "main".
 const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
 const [OWNER, REPO] = (process.env.GITHUB_BLOG_REPO || '').split('/');
 const BRANCH = process.env.GITHUB_BLOG_BRANCH || 'main';
@@ -24,27 +20,32 @@ function ghReady(req, res, next) {
   next();
 }
 
-// ── Реальная структура репозитория (НЕ content/articles — это плоская папка articles/ в корне) ──
-const ARTICLES_DIR = 'articles';
-const ARTICLES_INDEX = 'articles/index.html';
+// ── Разделы блога, которые устроены как «статья на файл» ──
+// (Обновления — отдельная система, таймлайн на одной странице, см. ниже)
+const SECTIONS = {
+  articles: { dir: 'articles', index: 'articles/index.html', cardClass: 'a-card', homeSync: true },
+  news: { dir: 'news', index: 'news/index.html', cardClass: 'news-card', homeSync: false },
+};
+function sectionMw(req, res, next) {
+  const s = SECTIONS[req.params.section];
+  if (!s) return res.status(404).json({ error: 'Неизвестный раздел' });
+  req.section = s;
+  next();
+}
+
 const HOME_INDEX = 'index.html';
 const SITEMAP_PATH = 'sitemap.xml';
 const FEED_PATH = 'feed.xml';
-const HOME_CARDS_LIMIT = 6; // сколько последних статей показывать на главной
+const UPDATES_PATH = 'updates/index.html';
+const HOME_CARDS_LIMIT = 6;
+const UPDATES_LIMIT = 3;
 
-// Границы «редактируемого тела» внутри HTML-файла статьи — всё остальное
-// (стили, скрипты, кнопка «наверх», куки-баннер) не трогаем вообще.
-const NAV_SCRIPT = '<script src="https://blog.antviz.ru/blog-nav.js" data-page="articles"></script>';
-const FOOTER_BTN_MARK = '<button class="back-to-top"';
+// Границы «редактируемого тела» — от подключения nav до подключения footer-скрипта.
+// Единая граница подходит и для articles/, и для news/ (кнопка «наверх» есть не везде).
+const NAV_SCRIPT_RE = /<script src="https:\/\/blog\.antviz\.ru\/blog-nav\.js" data-page="[^"]*"><\/script>/;
+const FOOTER_SCRIPT_RE = /<script src="https:\/\/blog\.antviz\.ru\/blog-footer\.js"[^>]*><\/script>/;
 
-function safePathForGeneric(p) {
-  if (typeof p !== 'string' || p.includes('..')) return null;
-  if (p === ARTICLES_DIR || p.startsWith(`${ARTICLES_DIR}/`)) return p;
-  return null;
-}
-
-// ── Библиотека иконок для карточек — это те же самые SVG, что уже используются
-// в дизайне (взято из articles/index.html), чтобы новые карточки не выбивались стилем. ──
+// ── Библиотека иконок для карточек — взяты из существующего дизайна ──
 const ICONS = {
   search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>',
   globe: '<circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>',
@@ -68,32 +69,31 @@ const ICONS = {
 const ICON_SVG_WRAP = (path) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${path}</svg>`;
 const ARROW_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>';
 const CLOCK_ICON = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>';
+// Иконки для пунктов таймлайна обновлений — фиксированные, по типу (add/fix/change), не выбираются вручную.
+const KIND_ICONS = {
+  add: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>',
+  fix: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="m9 12 2 2 4-4"/><circle cx="12" cy="12" r="10"/></svg>',
+  change: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z"/><path d="M12 22V12"/><path d="m7.5 4.27 9 5.15"/></svg>',
+};
+const TL_DOT_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>';
 
 router.get('/icons', requireAdmin, (req, res) => {
   res.json(Object.keys(ICONS).map((key) => ({ key, svg: ICON_SVG_WRAP(ICONS[key]) })));
 });
 
-// ── slug ──
 function slugify(s) {
   const map = { а:'a',б:'b',в:'v',г:'g',д:'d',е:'e',ё:'e',ж:'zh',з:'z',и:'i',й:'i',к:'k',л:'l',м:'m',н:'n',о:'o',п:'p',р:'r',с:'s',т:'t',у:'u',ф:'f',х:'h',ц:'c',ч:'ch',ш:'sh',щ:'sch',ъ:'',ы:'y',ь:'',э:'e',ю:'yu',я:'ya' };
   return String(s || '').toLowerCase().split('').map((ch) => map[ch] !== undefined ? map[ch] : ch).join('')
     .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'stranica';
 }
-
-function escHtml(s) {
-  return String(s || '').replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
-}
+function escHtml(s) { return String(s || '').replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
 function escAttr(s) { return escHtml(s).replace(/\n/g, ' '); }
 function escJson(s) { return JSON.stringify(String(s || '')).slice(1, -1); }
-
+function rfc822Date(iso) { const d = new Date(iso + 'T12:00:00+03:00'); return d.toUTCString().replace('GMT', '+0300'); }
 function ruDate(iso) {
   const months = ['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];
   const d = new Date(iso + 'T12:00:00');
   return `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
-}
-function rfc822Date(iso) {
-  const d = new Date(iso + 'T12:00:00+03:00');
-  return d.toUTCString().replace('GMT', '+0300');
 }
 function readingTimeMinutes(html) {
   const words = String(html || '').replace(/<[^>]+>/g, ' ').split(/\s+/).filter(Boolean).length;
@@ -101,39 +101,47 @@ function readingTimeMinutes(html) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// Работа с содержимым файла статьи: голова (SEO-теги) патчится точечно,
-// «тело» (всё между подключением nav и кнопкой «наверх») — редактируется
-// админом как есть, сырым HTML, мы его не разбираем и не перегенерируем.
+// Статьи/новости: голова патчится точечно, тело — сырой HTML как есть.
 // ────────────────────────────────────────────────────────────────
 function splitArticle(html) {
-  const startIdx = html.indexOf(NAV_SCRIPT);
-  const endIdx = html.indexOf(FOOTER_BTN_MARK);
-  if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) return null;
-  const bodyStart = startIdx + NAV_SCRIPT.length;
-  return {
-    head: html.slice(0, bodyStart),
-    body: html.slice(bodyStart, endIdx),
-    tail: html.slice(endIdx),
-  };
+  const navMatch = html.match(NAV_SCRIPT_RE);
+  const footerMatch = html.match(FOOTER_SCRIPT_RE);
+  if (!navMatch || !footerMatch) return null;
+  const bodyStart = navMatch.index + navMatch[0].length;
+  const endIdx = footerMatch.index;
+  if (endIdx <= bodyStart) return null;
+  return { head: html.slice(0, bodyStart), body: html.slice(bodyStart, endIdx), tail: html.slice(endIdx) };
 }
-
 function extractMeta(html) {
   const get = (re) => { const m = html.match(re); return m ? m[1] : ''; };
+  const cmsMetaRaw = get(/<!-- cms-meta: ([A-Za-z0-9+/=]+) -->/);
+  let cmsMeta = {};
+  if (cmsMetaRaw) { try { cmsMeta = JSON.parse(Buffer.from(cmsMetaRaw, 'base64').toString('utf-8')); } catch (e) { /* игнорируем битый комментарий, не роняем парсинг */ } }
   return {
     title: get(/<title>([\s\S]*?)<\/title>/),
     description: get(/<meta name="description" content="([^"]*)"/),
     ogImage: get(/<meta property="og:image" content="([^"]*)"/),
     category: get(/<meta property="article:section" content="([^"]*)"/),
     publishedTime: get(/<meta property="article:published_time" content="([^"]*)"/).slice(0, 10),
+    excerpt: cmsMeta.excerpt || '',
+    icon: cmsMeta.icon || '',
   };
 }
-
-// Точечно заменяет только известные теги в <head>, остальное (стили, favicon,
-// manifest и т.д.) остаётся байт-в-байт как было.
+// Экскерпт и иконка нигде в стандартных SEO-тегах не живут (это не часть
+// HTML-спеки), а нужны и для черновиков (у которых карточки ещё нет вообще).
+// Храним их в служебном HTML-комментарии — невидим на странице, переживает
+// любое число сохранений, что бы ни делали с публикацией/черновиком.
+function upsertCmsMetaComment(head, excerpt, icon) {
+  const json = JSON.stringify({ excerpt: excerpt || '', icon: icon || 'grid' });
+  const b64 = Buffer.from(json, 'utf-8').toString('base64');
+  const tag = `<!-- cms-meta: ${b64} -->`;
+  if (/<!-- cms-meta: [A-Za-z0-9+/=]+ -->/.test(head)) return head.replace(/<!-- cms-meta: [A-Za-z0-9+/=]+ -->/, tag);
+  return head.replace('</title>', '</title>\n  ' + tag);
+}
 function patchHead(head, f) {
-  const isoDate = f.publishedDate; // YYYY-MM-DD
+  const isoDate = f.publishedDate;
   const isoTime = `${isoDate}T12:00:00+03:00`;
-  const url = `${SITE}/articles/${f.slug}`;
+  const url = `${SITE}/${f.section}/${f.slug}`;
   const replacements = [
     [/<title>[\s\S]*?<\/title>/, `<title>${escHtml(f.title)} | Блог Antviz</title>`],
     [/<meta name="description" content="[^"]*"/, `<meta name="description" content="${escAttr(f.description)}"`],
@@ -155,30 +163,21 @@ function patchHead(head, f) {
   ];
   let out = head;
   for (const [re, val] of replacements) out = out.replace(re, val);
+  out = upsertCmsMetaComment(out, f.excerpt, f.icon);
   return out;
 }
+function buildArticleHtml({ f, body, tail, head }) { return patchHead(head, f) + body + tail; }
 
-function buildArticleHtml({ f, body, tail, head }) {
-  const patchedHead = patchHead(head, f);
-  return patchedHead + body + tail;
-}
-
-// ── Клонирование существующей статьи как каркаса для новой ──
-async function cloneSkeleton(cloneSlug) {
-  const { data } = await octokit.repos.getContent({ owner: OWNER, repo: REPO, path: `${ARTICLES_DIR}/${cloneSlug}.html`, ref: BRANCH });
+async function cloneSkeleton(section, cloneSlug) {
+  const { data } = await octokit.repos.getContent({ owner: OWNER, repo: REPO, path: `${SECTIONS[section].dir}/${cloneSlug}.html`, ref: BRANCH });
   const html = Buffer.from(data.content, 'base64').toString('utf-8');
   const split = splitArticle(html);
-  if (!split) throw new Error('Не удалось разобрать структуру исходной статьи для клонирования');
-  const oldMeta = extractMeta(html);
-  return { ...split, oldMeta };
+  if (!split) throw new Error('Не удалось разобрать структуру исходного файла для клонирования');
+  return { ...split, oldMeta: extractMeta(html) };
 }
 
-// ────────────────────────────────────────────────────────────────
-// Карточки на articles/index.html и на главной — простые точечные
-// вставки/замены/удаления по slug, без риска для остального макета.
-// ────────────────────────────────────────────────────────────────
 function buildIndexCard(f) {
-  return `      <a href="${f.slug}" class="a-card reveal">
+  return `      <a href="${f.slug}" class="${f.cardClass} reveal">
         <div class="ico">${ICON_SVG_WRAP(ICONS[f.icon] || ICONS.grid)}</div>
         <span class="tag">${escHtml(f.category)}</span>
         <h3>${escHtml(f.cardTitle)}</h3>
@@ -198,55 +197,40 @@ function buildHomeCard(f) {
         </div>
       </a>`;
 }
-
 function cardRegexFor(slug, cls) {
   const esc = slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return new RegExp(`\\n?[ \\t]*<a href="(?:articles/)?${esc}"[^>]*class="${cls}[^"]*"[\\s\\S]*?<\\/a>`, '');
 }
-
 function upsertCard(html, slug, cls, newCardBlock) {
   const re = cardRegexFor(slug, cls);
-  if (re.test(html)) {
-    return html.replace(re, '\n' + newCardBlock);
-  }
+  if (re.test(html)) return html.replace(re, '\n' + newCardBlock);
   const firstCardRe = new RegExp(`([ \\t]*)<a href="[^"]*"[^>]*class="${cls}[^"]*"`);
   const m = html.match(firstCardRe);
   if (!m) return html;
-  const insertAt = m.index;
-  return html.slice(0, insertAt) + newCardBlock + '\n\n' + html.slice(insertAt);
+  return html.slice(0, m.index) + newCardBlock + '\n\n' + html.slice(m.index);
 }
-
-function removeCard(html, slug, cls) {
-  const re = cardRegexFor(slug, cls);
-  return html.replace(re, '');
-}
-
+function removeCard(html, slug, cls) { return html.replace(cardRegexFor(slug, cls), ''); }
 function capHomeCards(html, limit) {
   const re = /<a href="articles\/[^"]*"[^>]*class="news-card[^"]*"[\s\S]*?<\/a>/g;
   const matches = [...html.matchAll(re)];
   if (matches.length <= limit) return html;
-  for (const m of matches.slice(limit)) {
-    html = html.replace(m[0], '');
-  }
+  for (const m of matches.slice(limit)) html = html.replace(m[0], '');
   return html;
 }
 
-// ────────────────────────────────────────────────────────────────
-// sitemap.xml / feed.xml
-// ────────────────────────────────────────────────────────────────
-function upsertSitemap(xml, slug) {
-  const url = `${SITE}/articles/${slug}`;
+function upsertSitemap(xml, section, slug) {
+  const url = `${SITE}/${section}/${slug}`;
   if (xml.includes(`<loc>${url}</loc>`)) return xml;
   const entry = `  <url>\n    <loc>${url}</loc>\n    <changefreq>monthly</changefreq>\n    <priority>0.8</priority>\n  </url>\n`;
   return xml.replace('</urlset>', entry + '</urlset>');
 }
-function removeSitemap(xml, slug) {
-  const url = `${SITE}/articles/${slug}`;
+function removeSitemap(xml, section, slug) {
+  const url = `${SITE}/${section}/${slug}`;
   const re = new RegExp(`\\s*<url>\\s*<loc>${url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}<\\/loc>[\\s\\S]*?<\\/url>`);
   return xml.replace(re, '');
 }
-function upsertFeed(xml, f) {
-  const url = `${SITE}/articles/${f.slug}`;
+function upsertFeed(xml, section, f) {
+  const url = `${SITE}/${section}/${f.slug}`;
   const entry = `  <item>\n    <title>${escHtml(f.title)}</title>\n    <link>${url}</link>\n    <guid>${url}</guid>\n    <pubDate>${rfc822Date(f.publishedDate)}</pubDate>\n    <description>${escHtml(f.excerpt)}</description>\n  </item>\n`;
   const re = new RegExp(`\\s*<item>\\s*<title>[\\s\\S]*?<link>${url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}<\\/link>[\\s\\S]*?<\\/item>`);
   let out = xml.replace(re, '');
@@ -254,15 +238,19 @@ function upsertFeed(xml, f) {
   if (firstItem === -1) return out.replace('</channel>', entry + '</channel>');
   return out.slice(0, firstItem) + entry + '\n' + out.slice(firstItem);
 }
-function removeFeed(xml, slug) {
-  const url = `${SITE}/articles/${slug}`;
+function removeFeed(xml, section, slug) {
+  const url = `${SITE}/${section}/${slug}`;
   const re = new RegExp(`\\s*<item>\\s*<title>[\\s\\S]*?<link>${url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}<\\/link>[\\s\\S]*?<\\/item>`);
   return xml.replace(re, '');
 }
+function insertNoindex(html) {
+  if (/<meta name="robots"/.test(html)) return html;
+  return html.replace('</title>', '</title>\n  <meta name="robots" content="noindex" />');
+}
+function removeNoindex(html) { return html.replace(/\s*<meta name="robots" content="noindex"\s*\/?>/, ''); }
 
 // ────────────────────────────────────────────────────────────────
-// Атомарный коммит нескольких файлов разом (Git Data API) — вместо
-// 5 отдельных коммитов на каждое сохранение статьи.
+// Git: чтение файла + атомарный коммит нескольких файлов разом
 // ────────────────────────────────────────────────────────────────
 async function getFile(path) {
   try {
@@ -273,12 +261,10 @@ async function getFile(path) {
     throw err;
   }
 }
-
 async function commitFiles(files, message) {
   const { data: ref } = await octokit.git.getRef({ owner: OWNER, repo: REPO, ref: `heads/${BRANCH}` });
   const baseSha = ref.object.sha;
   const { data: baseCommit } = await octokit.git.getCommit({ owner: OWNER, repo: REPO, commit_sha: baseSha });
-
   const tree = await Promise.all(
     Object.entries(files).map(async ([path, content]) => {
       if (content === null) return { path, mode: '100644', type: 'blob', sha: null };
@@ -286,7 +272,6 @@ async function commitFiles(files, message) {
       return { path, mode: '100644', type: 'blob', sha: blob.sha };
     })
   );
-
   const { data: newTree } = await octokit.git.createTree({ owner: OWNER, repo: REPO, base_tree: baseCommit.tree.sha, tree });
   const { data: newCommit } = await octokit.git.createCommit({ owner: OWNER, repo: REPO, message, tree: newTree.sha, parents: [baseSha] });
   await octokit.git.updateRef({ owner: OWNER, repo: REPO, ref: `heads/${BRANCH}`, sha: newCommit.sha });
@@ -294,218 +279,199 @@ async function commitFiles(files, message) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// РОУТЫ
+// Автопубликация черновиков по дате — вызывается по расписанию из server.js
+// (см. utils/blogAutoPublish.js). Черновик с датой публикации в прошлом или
+// сегодня публикуется сам, без захода в админку.
 // ────────────────────────────────────────────────────────────────
+async function publishDraftNow(section, slug) {
+  const html = await getFile(`${SECTIONS[section].dir}/${slug}.html`);
+  if (!html || !/<meta name="robots" content="noindex"/.test(html)) return; // уже не черновик или не найден
+  const split = splitArticle(html);
+  if (!split) return;
+  const meta = extractMeta(html);
+  const cleanTitle = meta.title.replace(/\s*\|\s*Блог Antviz\s*$/, '');
+  const f = {
+    slug, section, title: cleanTitle, description: meta.description, category: meta.category,
+    ogImage: meta.ogImage, publishedDate: meta.publishedTime, cardTitle: cleanTitle,
+    excerpt: meta.excerpt || '', icon: meta.icon || 'grid', readingTime: readingTimeMinutes(split.body),
+    cardClass: SECTIONS[section].cardClass,
+  };
+  const articleHtml = removeNoindex(html);
+  const commitPayload = { [`${SECTIONS[section].dir}/${slug}.html`]: articleHtml };
+  const [indexHtml, homeHtml, sitemapXml, feedXml] = await Promise.all([
+    getFile(SECTIONS[section].index), SECTIONS[section].homeSync ? getFile(HOME_INDEX) : null, getFile(SITEMAP_PATH), getFile(FEED_PATH),
+  ]);
+  if (indexHtml) commitPayload[SECTIONS[section].index] = upsertCard(indexHtml, slug, SECTIONS[section].cardClass, buildIndexCard(f));
+  if (SECTIONS[section].homeSync && homeHtml) commitPayload[HOME_INDEX] = capHomeCards(upsertCard(homeHtml, slug, 'news-card', buildHomeCard(f)), HOME_CARDS_LIMIT);
+  if (sitemapXml) commitPayload[SITEMAP_PATH] = upsertSitemap(sitemapXml, section, slug);
+  if (feedXml) commitPayload[FEED_PATH] = upsertFeed(feedXml, section, f);
+  await commitFiles(commitPayload, `Блог: автопубликация «${f.title}»`);
+  delete listCache[section];
+}
 
-let listCache = null;
-router.get('/articles', requireAdmin, ghReady, async (req, res) => {
-  try {
-    if (listCache && Date.now() - listCache.at < 30_000) return res.json(listCache.data);
-    const { data } = await octokit.repos.getContent({ owner: OWNER, repo: REPO, path: ARTICLES_DIR, ref: BRANCH });
-    const files = data.filter((f) => f.type === 'file' && f.name.endsWith('.html') && f.name !== 'index.html');
-    const items = await Promise.all(files.map(async (f) => {
-      const slug = f.name.replace(/\.html$/, '');
-      const html = await getFile(f.path);
-      const meta = extractMeta(html);
-      const draft = /<meta name="robots" content="noindex"/.test(html);
-      return {
-        slug,
-        title: meta.title.replace(/\s*\|\s*Блог Antviz\s*$/, ''),
-        description: meta.description,
-        category: meta.category,
-        ogImage: meta.ogImage,
-        publishedDate: meta.publishedTime,
-        draft,
-      };
-    }));
-    items.sort((a, b) => (b.publishedDate || '').localeCompare(a.publishedDate || ''));
-    listCache = { at: Date.now(), data: items };
-    res.json(items);
-  } catch (err) {
-    console.error('blog-cms GET /articles:', err);
-    res.status(500).json({ error: 'Не удалось получить список статей' });
-  }
-});
-
-router.get('/articles/:slug', requireAdmin, ghReady, async (req, res) => {
-  try {
-    const html = await getFile(`${ARTICLES_DIR}/${req.params.slug}.html`);
-    if (!html) return res.status(404).json({ error: 'Статья не найдена' });
-    const split = splitArticle(html);
-    if (!split) return res.status(500).json({ error: 'Не удалось разобрать структуру файла статьи (нестандартный формат)' });
-    const meta = extractMeta(html);
-    const draft = /<meta name="robots" content="noindex"/.test(html);
-    const indexHtml = await getFile(ARTICLES_INDEX);
-    const cardMatch = indexHtml && indexHtml.match(cardRegexFor(req.params.slug, 'a-card'));
-    const excerptMatch = cardMatch && cardMatch[0].match(/<p>([\s\S]*?)<\/p>/);
-    res.json({
-      slug: req.params.slug,
-      title: meta.title.replace(/\s*\|\s*Блог Antviz\s*$/, ''),
-      description: meta.description,
-      category: meta.category,
-      ogImage: meta.ogImage,
-      publishedDate: meta.publishedTime,
-      excerpt: excerptMatch ? excerptMatch[1] : '',
-      draft,
-      bodyHtml: split.body,
-      readingTime: readingTimeMinutes(split.body),
-    });
-  } catch (err) {
-    console.error('blog-cms GET /articles/:slug:', err);
-    res.status(500).json({ error: 'Не удалось загрузить статью' });
-  }
-});
-
-router.get('/articles-for-clone', requireAdmin, ghReady, async (req, res) => {
-  try {
-    if (listCache && Date.now() - listCache.at < 30_000) {
-      return res.json(listCache.data.map((a) => ({ slug: a.slug, title: a.title })));
+async function checkAndPublishDueDrafts() {
+  if (!process.env.GITHUB_TOKEN || !OWNER || !REPO) return;
+  const today = new Date().toISOString().slice(0, 10);
+  for (const section of Object.keys(SECTIONS)) {
+    try {
+      const { data } = await octokit.repos.getContent({ owner: OWNER, repo: REPO, path: SECTIONS[section].dir, ref: BRANCH });
+      const files = data.filter((f) => f.type === 'file' && f.name.endsWith('.html') && f.name !== 'index.html');
+      for (const file of files) {
+        const html = await getFile(file.path);
+        if (!html || !/<meta name="robots" content="noindex"/.test(html)) continue;
+        const meta = extractMeta(html);
+        if (!meta.publishedTime || meta.publishedTime > today) continue;
+        const slug = file.name.replace(/\.html$/, '');
+        await publishDraftNow(section, slug);
+        console.log(`blog-cms: автопубликация по расписанию — ${section}/${slug}`);
+      }
+    } catch (err) {
+      console.error(`blog-cms checkAndPublishDueDrafts (${section}):`, err.message);
     }
-    const { data } = await octokit.repos.getContent({ owner: OWNER, repo: REPO, path: ARTICLES_DIR, ref: BRANCH });
-    const files = data.filter((f) => f.type === 'file' && f.name.endsWith('.html') && f.name !== 'index.html');
-    res.json(files.map((f) => ({ slug: f.name.replace(/\.html$/, ''), title: f.name })));
+  }
+}
+
+// ────────────────────────────────────────────────────────────────
+// ОБНОВЛЕНИЯ (updates/index.html) — таймлайн версий, не файлы-статьи
+// ────────────────────────────────────────────────────────────────
+function parseUpdates(html) {
+  const items = [...html.matchAll(/<div class="tl-item( major)?[^"]*"[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/g)];
+  // ^ жадный вложенный div сложно ловить регуляркой надёжно — парсим по частям ниже, это только для подсчёта позиций
+  const blocks = [];
+  const re = /<div class="tl-item( major)?\s*reveal">[\s\S]*?<div class="tl-card">\s*<div class="tl-head">([\s\S]*?)<\/div>\s*<ul class="tl-list">([\s\S]*?)<\/ul>\s*<\/div>\s*<\/div>/g;
+  let m;
+  while ((m = re.exec(html))) {
+    const [full, majorFlag, head, listHtml] = m;
+    const version = (head.match(/tl-version">([^<]*)</) || [])[1] || '';
+    const dateText = (head.match(/tl-date">([^<]*)</) || [])[1] || '';
+    const fresh = /tl-badge fresh/.test(head);
+    const liItems = [...listHtml.matchAll(/<li><span class="kind (\w+)">[\s\S]*?<\/span><span><b>([^<]*)<\/b>\s*([\s\S]*?)<\/span><\/li>/g)]
+      .map((lm) => ({ kind: lm[1], title: lm[2], description: lm[3].trim() }));
+    blocks.push({ version, dateText, major: !!majorFlag, fresh, items: liItems, raw: full, index: m.index });
+  }
+  return blocks;
+}
+function buildTlItem(entry) {
+  const itemsHtml = entry.items.map((it) => `              <li><span class="kind ${it.kind}">${KIND_ICONS[it.kind] || KIND_ICONS.add}</span><span><b>${escHtml(it.title)}.</b> ${escHtml(it.description)}</span></li>`).join('\n');
+  return `        <div class="tl-item${entry.major ? ' major' : ''} reveal">
+          <div class="tl-dot">
+            ${TL_DOT_ICON}
+          </div>
+          <div class="tl-card">
+            <div class="tl-head">
+              <span class="tl-version">${escHtml(entry.version)}</span>
+              <span class="tl-date">${ruDate(entry.date)}</span>
+              ${entry.fresh ? '<span class="tl-badge fresh">Свежее</span>' : ''}
+            </div>
+            <ul class="tl-list">
+${itemsHtml}
+            </ul>
+          </div>
+        </div>`;
+}
+function updateHomePreview(homeHtml, entry) {
+  const first = entry.items[0];
+  const summaryBold = first ? escHtml(first.title) : escHtml(entry.version);
+  const summaryRest = entry.items.slice(1, 3).map((it) => escHtml(it.title.replace(/\.$/, '').toLowerCase())).join(', ');
+  const block = `<a href="updates" class="update-preview reveal">
+      <div class="v">
+        <span class="v-num">${escHtml(entry.version)}</span>
+        <span class="v-badge">Свежее</span>
+      </div>
+      <div class="v-text"><b>${summaryBold}</b>${summaryRest ? ', ' + summaryRest : ''}.</div>
+      <div class="read">Подробнее <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg></div>
+    </a>`;
+  return homeHtml.replace(/<a href="updates" class="update-preview[^"]*"[\s\S]*?<\/a>/, block);
+}
+
+router.get('/updates/list', requireAdmin, ghReady, async (req, res) => {
+  try {
+    const html = await getFile(UPDATES_PATH);
+    if (!html) return res.status(404).json({ error: 'Файл обновлений не найден' });
+    const entries = parseUpdates(html).map((e) => ({
+      version: e.version, date: e.dateText, major: e.major, fresh: e.fresh, items: e.items,
+    }));
+    res.json(entries);
   } catch (err) {
-    res.status(500).json({ error: 'Не удалось получить список статей' });
+    console.error('blog-cms GET /updates/list:', err);
+    res.status(500).json({ error: 'Не удалось получить список обновлений' });
   }
 });
 
-function validateFields(b) {
-  if (!b.title || !b.title.trim()) return 'Укажите заголовок';
-  if (!b.category || !b.category.trim()) return 'Укажите категорию';
-  if (!b.publishedDate || !/^\d{4}-\d{2}-\d{2}$/.test(b.publishedDate)) return 'Укажите дату публикации';
-  if (!b.bodyHtml || !b.bodyHtml.trim()) return 'Тело статьи не может быть пустым';
+function validateUpdate(b) {
+  if (!b.version || !b.version.trim()) return 'Укажите версию';
+  if (!b.date || !/^\d{4}-\d{2}-\d{2}$/.test(b.date)) return 'Укажите дату';
+  if (!Array.isArray(b.items) || !b.items.length) return 'Добавьте хотя бы один пункт';
+  for (const it of b.items) {
+    if (!['add', 'fix', 'change'].includes(it.kind)) return 'Некорректный тип пункта';
+    if (!it.title || !it.title.trim()) return 'У каждого пункта должен быть заголовок';
+  }
   return null;
 }
 
-router.post('/articles', requireAdmin, ghReady, async (req, res) => {
-  const b = req.body || {};
-  const err = validateFields(b);
-  if (err) return res.status(400).json({ error: err });
-  if (!b.cloneFrom) return res.status(400).json({ error: 'Укажите статью-каркас для клонирования (cloneFrom)' });
-
-  try {
-    const slug = slugify(b.slug || b.title);
-    const existing = await getFile(`${ARTICLES_DIR}/${slug}.html`);
-    if (existing) return res.status(409).json({ error: 'Статья с таким адресом (slug) уже существует' });
-
-    const skeleton = await cloneSkeleton(b.cloneFrom);
-    const f = {
-      slug, title: b.title.trim(), description: (b.description || '').trim(),
-      category: b.category.trim(), ogImage: b.ogImage || '', publishedDate: b.publishedDate,
-      cardTitle: b.title.trim(), excerpt: (b.excerpt || '').trim(), icon: b.icon || 'grid',
-      readingTime: readingTimeMinutes(b.bodyHtml),
-    };
-
-    let body = b.bodyHtml;
-    if (skeleton.oldMeta.title) {
-      const oldClean = skeleton.oldMeta.title.replace(/\s*\|\s*Блог Antviz\s*$/, '');
-      body = body.split(oldClean).join(f.title);
-    }
-    if (skeleton.oldMeta.category) body = body.split(skeleton.oldMeta.category).join(f.category);
-
-    const articleHtml = buildArticleHtml({ f, body, tail: skeleton.tail, head: skeleton.head });
-    const finalHtml = b.draft ? insertNoindex(articleHtml) : articleHtml;
-
-    const commitPayload = { [`${ARTICLES_DIR}/${slug}.html`]: finalHtml };
-    if (!b.draft) {
-      const [indexHtml, homeHtml, sitemapXml, feedXml] = await Promise.all([
-        getFile(ARTICLES_INDEX), getFile(HOME_INDEX), getFile(SITEMAP_PATH), getFile(FEED_PATH),
-      ]);
-      if (indexHtml) commitPayload[ARTICLES_INDEX] = upsertCard(indexHtml, slug, 'a-card', buildIndexCard(f));
-      if (homeHtml) commitPayload[HOME_INDEX] = capHomeCards(upsertCard(homeHtml, slug, 'news-card', buildHomeCard(f)), HOME_CARDS_LIMIT);
-      if (sitemapXml) commitPayload[SITEMAP_PATH] = upsertSitemap(sitemapXml, slug);
-      if (feedXml) commitPayload[FEED_PATH] = upsertFeed(feedXml, f);
-    }
-
-    await commitFiles(commitPayload, `Блог: новая статья «${f.title}»`);
-    listCache = null;
-    res.json({ ok: true, slug });
-  } catch (err) {
-    console.error('blog-cms POST /articles:', err);
-    res.status(500).json({ error: 'Не удалось создать статью: ' + err.message });
+// ── POST /api/blog-cms/updates ── новая запись в таймлайн ──
+// Собирает итоговый updates/index.html: новая запись первой, существующие —
+// без бейджа fresh, всего не больше UPDATES_LIMIT записей. Работает по точным
+// смещениям из parseUpdates (а не повторным regex), поэтому не может случайно
+// зацепить два блока разом.
+function applyNewUpdateEntry(html, entries, newEntry) {
+  const newBlock = buildTlItem({ ...newEntry, fresh: true });
+  if (!entries.length) {
+    // файл вообще без записей (не должно случаться в реальности, но не падаем)
+    const insertAt = html.indexOf('<div class="tl"');
+    return insertAt === -1 ? html : html.slice(0, insertAt) + newBlock + '\n\n' + html.slice(insertAt);
   }
-});
+  const prefix = html.slice(0, entries[0].index);
+  const lastEntry = entries[entries.length - 1];
+  const suffix = html.slice(lastEntry.index + lastEntry.raw.length);
+  const keptExisting = entries.slice(0, UPDATES_LIMIT - 1).map((e) => e.raw.replace(/\s*<span class="tl-badge fresh">Свежее<\/span>/, ''));
+  const middle = [newBlock, ...keptExisting].join('\n\n');
+  return prefix + middle + '\n\n' + suffix;
+}
 
-router.put('/articles/:slug', requireAdmin, ghReady, async (req, res) => {
+router.post('/updates', requireAdmin, ghReady, async (req, res) => {
   const b = req.body || {};
-  const err = validateFields(b);
+  const err = validateUpdate(b);
   if (err) return res.status(400).json({ error: err });
-  const slug = req.params.slug;
-
   try {
-    const html = await getFile(`${ARTICLES_DIR}/${slug}.html`);
-    if (!html) return res.status(404).json({ error: 'Статья не найдена' });
-    const split = splitArticle(html);
-    if (!split) return res.status(500).json({ error: 'Не удалось разобрать структуру файла статьи' });
+    const html = await getFile(UPDATES_PATH);
+    if (!html) return res.status(500).json({ error: 'Файл обновлений не найден' });
+    const entries = parseUpdates(html);
+    if (entries.some((e) => e.version === b.version.trim())) return res.status(409).json({ error: 'Такая версия уже есть' });
 
-    const f = {
-      slug, title: b.title.trim(), description: (b.description || '').trim(),
-      category: b.category.trim(), ogImage: b.ogImage || '', publishedDate: b.publishedDate,
-      cardTitle: b.title.trim(), excerpt: (b.excerpt || '').trim(), icon: b.icon || 'grid',
-      readingTime: readingTimeMinutes(b.bodyHtml),
-    };
-    let articleHtml = buildArticleHtml({ f, body: b.bodyHtml, tail: split.tail, head: split.head });
-    const nowDraft = !!b.draft;
-    articleHtml = nowDraft ? insertNoindex(articleHtml) : removeNoindex(articleHtml);
+    const newEntry = { version: b.version.trim(), date: b.date, major: !!b.major, items: b.items };
+    const html2 = applyNewUpdateEntry(html, entries, newEntry);
 
-    const commitPayload = { [`${ARTICLES_DIR}/${slug}.html`]: articleHtml };
-    const [indexHtml, homeHtml, sitemapXml, feedXml] = await Promise.all([
-      getFile(ARTICLES_INDEX), getFile(HOME_INDEX), getFile(SITEMAP_PATH), getFile(FEED_PATH),
-    ]);
+    const homeHtml = await getFile(HOME_INDEX);
+    const commitPayload = { [UPDATES_PATH]: html2 };
+    if (homeHtml) commitPayload[HOME_INDEX] = updateHomePreview(homeHtml, newEntry);
 
-    if (nowDraft) {
-      if (indexHtml) commitPayload[ARTICLES_INDEX] = removeCard(indexHtml, slug, 'a-card');
-      if (homeHtml) commitPayload[HOME_INDEX] = removeCard(homeHtml, slug, 'news-card');
-      if (sitemapXml) commitPayload[SITEMAP_PATH] = removeSitemap(sitemapXml, slug);
-      if (feedXml) commitPayload[FEED_PATH] = removeFeed(feedXml, slug);
-    } else {
-      if (indexHtml) commitPayload[ARTICLES_INDEX] = upsertCard(indexHtml, slug, 'a-card', buildIndexCard(f));
-      if (homeHtml) commitPayload[HOME_INDEX] = capHomeCards(upsertCard(homeHtml, slug, 'news-card', buildHomeCard(f)), HOME_CARDS_LIMIT);
-      if (sitemapXml) commitPayload[SITEMAP_PATH] = upsertSitemap(sitemapXml, slug);
-      if (feedXml) commitPayload[FEED_PATH] = upsertFeed(feedXml, f);
-    }
-
-    await commitFiles(commitPayload, `Блог: правки в статье «${f.title}»`);
-    listCache = null;
-    res.json({ ok: true, slug });
-  } catch (err) {
-    console.error('blog-cms PUT /articles/:slug:', err);
-    res.status(500).json({ error: 'Не удалось сохранить статью: ' + err.message });
-  }
-});
-
-router.delete('/articles/:slug', requireAdmin, ghReady, async (req, res) => {
-  const slug = req.params.slug;
-  try {
-    const html = await getFile(`${ARTICLES_DIR}/${slug}.html`);
-    if (!html) return res.status(404).json({ error: 'Статья не найдена' });
-
-    const [indexHtml, homeHtml, sitemapXml, feedXml] = await Promise.all([
-      getFile(ARTICLES_INDEX), getFile(HOME_INDEX), getFile(SITEMAP_PATH), getFile(FEED_PATH),
-    ]);
-    const commitPayload = { [`${ARTICLES_DIR}/${slug}.html`]: null };
-    if (indexHtml) commitPayload[ARTICLES_INDEX] = removeCard(indexHtml, slug, 'a-card');
-    if (homeHtml) commitPayload[HOME_INDEX] = removeCard(homeHtml, slug, 'news-card');
-    if (sitemapXml) commitPayload[SITEMAP_PATH] = removeSitemap(sitemapXml, slug);
-    if (feedXml) commitPayload[FEED_PATH] = removeFeed(feedXml, slug);
-
-    await commitFiles(commitPayload, `Блог: удалена статья «${slug}»`);
-    listCache = null;
+    await commitFiles(commitPayload, `Блог: новая запись в обновлениях ${newEntry.version}`);
     res.json({ ok: true });
   } catch (err) {
-    console.error('blog-cms DELETE /articles/:slug:', err);
-    res.status(500).json({ error: 'Не удалось удалить статью: ' + err.message });
+    console.error('blog-cms POST /updates:', err);
+    res.status(500).json({ error: 'Не удалось сохранить: ' + err.message });
   }
 });
 
-function insertNoindex(html) {
-  if (/<meta name="robots"/.test(html)) return html;
-  return html.replace('</title>', '</title>\n  <meta name="robots" content="noindex" />');
-}
-function removeNoindex(html) {
-  return html.replace(/\s*<meta name="robots" content="noindex"\s*\/?>/, '');
-}
+// ── DELETE /api/blog-cms/updates/:version ──
+router.delete('/updates/:version', requireAdmin, ghReady, async (req, res) => {
+  try {
+    const html = await getFile(UPDATES_PATH);
+    if (!html) return res.status(404).json({ error: 'Не найдено' });
+    const entries = parseUpdates(html);
+    const target = entries.find((e) => e.version === req.params.version);
+    if (!target) return res.status(404).json({ error: 'Версия не найдена' });
+    const html2 = html.replace(target.raw, '');
+    await commitFiles({ [UPDATES_PATH]: html2 }, `Блог: удалена запись ${req.params.version}`);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('blog-cms DELETE /updates/:version:', err);
+    res.status(500).json({ error: 'Не удалось удалить: ' + err.message });
+  }
+});
 
+// ── POST /api/blog-cms/image ──
 router.post('/image', requireAdmin, ghReady, async (req, res) => {
   const { fileName, base64, folder } = req.body || {};
   if (!fileName || !base64 || base64.length < 10) return res.status(400).json({ error: 'Некорректные данные файла' });
@@ -515,9 +481,7 @@ router.post('/image', requireAdmin, ghReady, async (req, res) => {
   try {
     const match = /^data:([^;]+);base64,(.+)$/.exec(base64);
     const content = match ? match[2] : base64;
-    await octokit.repos.createOrUpdateFileContents({
-      owner: OWNER, repo: REPO, path, message: `Блог: загружена картинка ${safeName}`, content, branch: BRANCH,
-    });
+    await octokit.repos.createOrUpdateFileContents({ owner: OWNER, repo: REPO, path, message: `Блог: загружена картинка ${safeName}`, content, branch: BRANCH });
     res.json({ ok: true, url: `${SITE}/${path}` });
   } catch (err) {
     console.error('blog-cms POST /image:', err);
@@ -535,4 +499,194 @@ router.get('/build-status', requireAdmin, ghReady, async (req, res) => {
   }
 });
 
+// ────────────────────────────────────────────────────────────────
+// РОУТЫ: /:section (articles | news)
+// ────────────────────────────────────────────────────────────────
+const listCache = {};
+router.get('/:section', requireAdmin, ghReady, sectionMw, async (req, res) => {
+  try {
+    const cacheKey = req.params.section;
+    if (listCache[cacheKey] && Date.now() - listCache[cacheKey].at < 30_000) return res.json(listCache[cacheKey].data);
+    const { data } = await octokit.repos.getContent({ owner: OWNER, repo: REPO, path: req.section.dir, ref: BRANCH });
+    const files = data.filter((f) => f.type === 'file' && f.name.endsWith('.html') && f.name !== 'index.html');
+    const items = await Promise.all(files.map(async (f) => {
+      const slug = f.name.replace(/\.html$/, '');
+      const html = await getFile(f.path);
+      const meta = extractMeta(html);
+      const draft = /<meta name="robots" content="noindex"/.test(html);
+      return {
+        slug, title: meta.title.replace(/\s*\|\s*Блог Antviz\s*$/, ''), description: meta.description,
+        category: meta.category, ogImage: meta.ogImage, publishedDate: meta.publishedTime, draft,
+      };
+    }));
+    items.sort((a, b) => (b.publishedDate || '').localeCompare(a.publishedDate || ''));
+    listCache[cacheKey] = { at: Date.now(), data: items };
+    res.json(items);
+  } catch (err) {
+    console.error('blog-cms GET /:section:', err);
+    res.status(500).json({ error: 'Не удалось получить список' });
+  }
+});
+
+router.get('/:section/for-clone', requireAdmin, ghReady, sectionMw, async (req, res) => {
+  try {
+    const { data } = await octokit.repos.getContent({ owner: OWNER, repo: REPO, path: req.section.dir, ref: BRANCH });
+    const files = data.filter((f) => f.type === 'file' && f.name.endsWith('.html') && f.name !== 'index.html');
+    res.json(files.map((f) => ({ slug: f.name.replace(/\.html$/, ''), title: f.name })));
+  } catch (err) {
+    res.status(500).json({ error: 'Не удалось получить список' });
+  }
+});
+
+router.get('/:section/:slug', requireAdmin, ghReady, sectionMw, async (req, res) => {
+  try {
+    const html = await getFile(`${req.section.dir}/${req.params.slug}.html`);
+    if (!html) return res.status(404).json({ error: 'Не найдено' });
+    const split = splitArticle(html);
+    if (!split) return res.status(500).json({ error: 'Не удалось разобрать структуру файла' });
+    const meta = extractMeta(html);
+    const draft = /<meta name="robots" content="noindex"/.test(html);
+    // excerpt/icon для старых статей (сохранённых до появления cms-meta-комментария)
+    // подстрахуем из уже существующей карточки — новые всегда берут их из комментария.
+    let excerpt = meta.excerpt, icon = meta.icon;
+    if (!excerpt || !icon) {
+      const indexHtml = await getFile(req.section.index);
+      const cardMatch = indexHtml && indexHtml.match(cardRegexFor(req.params.slug, req.section.cardClass));
+      if (cardMatch) {
+        const excerptMatch = cardMatch[0].match(/<p>([\s\S]*?)<\/p>/);
+        if (!excerpt && excerptMatch) excerpt = excerptMatch[1];
+      }
+    }
+    res.json({
+      slug: req.params.slug, title: meta.title.replace(/\s*\|\s*Блог Antviz\s*$/, ''), description: meta.description,
+      category: meta.category, ogImage: meta.ogImage, publishedDate: meta.publishedTime,
+      excerpt: excerpt || '', icon: icon || 'grid', draft, bodyHtml: split.body, readingTime: readingTimeMinutes(split.body),
+    });
+  } catch (err) {
+    console.error('blog-cms GET /:section/:slug:', err);
+    res.status(500).json({ error: 'Не удалось загрузить' });
+  }
+});
+
+function validateFields(b) {
+  if (!b.title || !b.title.trim()) return 'Укажите заголовок';
+  if (!b.category || !b.category.trim()) return 'Укажите категорию';
+  if (!b.publishedDate || !/^\d{4}-\d{2}-\d{2}$/.test(b.publishedDate)) return 'Укажите дату публикации';
+  if (!b.bodyHtml || !b.bodyHtml.trim()) return 'Тело не может быть пустым';
+  return null;
+}
+
+router.post('/:section', requireAdmin, ghReady, sectionMw, async (req, res) => {
+  const b = req.body || {};
+  const err = validateFields(b);
+  if (err) return res.status(400).json({ error: err });
+  if (!b.cloneFrom) return res.status(400).json({ error: 'Укажите каркас для клонирования' });
+  const section = req.params.section;
+  try {
+    const slug = slugify(b.slug || b.title);
+    if (await getFile(`${req.section.dir}/${slug}.html`)) return res.status(409).json({ error: 'Материал с таким адресом уже существует' });
+
+    const skeleton = await cloneSkeleton(section, b.cloneFrom);
+    const f = {
+      slug, section, title: b.title.trim(), description: (b.description || '').trim(), category: b.category.trim(),
+      ogImage: b.ogImage || '', publishedDate: b.publishedDate, cardTitle: b.title.trim(),
+      excerpt: (b.excerpt || '').trim(), icon: b.icon || 'grid', readingTime: readingTimeMinutes(b.bodyHtml),
+      cardClass: req.section.cardClass,
+    };
+    let body = b.bodyHtml;
+    if (skeleton.oldMeta.title) body = body.split(skeleton.oldMeta.title.replace(/\s*\|\s*Блог Antviz\s*$/, '')).join(f.title);
+    if (skeleton.oldMeta.category) body = body.split(skeleton.oldMeta.category).join(f.category);
+
+    let articleHtml = buildArticleHtml({ f, body, tail: skeleton.tail, head: skeleton.head });
+    if (b.draft) articleHtml = insertNoindex(articleHtml);
+
+    const commitPayload = { [`${req.section.dir}/${slug}.html`]: articleHtml };
+    if (!b.draft) {
+      const [indexHtml, homeHtml, sitemapXml, feedXml] = await Promise.all([
+        getFile(req.section.index), req.section.homeSync ? getFile(HOME_INDEX) : null, getFile(SITEMAP_PATH), getFile(FEED_PATH),
+      ]);
+      if (indexHtml) commitPayload[req.section.index] = upsertCard(indexHtml, slug, req.section.cardClass, buildIndexCard(f));
+      if (req.section.homeSync && homeHtml) commitPayload[HOME_INDEX] = capHomeCards(upsertCard(homeHtml, slug, 'news-card', buildHomeCard(f)), HOME_CARDS_LIMIT);
+      if (sitemapXml) commitPayload[SITEMAP_PATH] = upsertSitemap(sitemapXml, section, slug);
+      if (feedXml) commitPayload[FEED_PATH] = upsertFeed(feedXml, section, f);
+    }
+    await commitFiles(commitPayload, `Блог: новый материал «${f.title}» (${section})`);
+    delete listCache[section];
+    res.json({ ok: true, slug });
+  } catch (err) {
+    console.error('blog-cms POST /:section:', err);
+    res.status(500).json({ error: 'Не удалось создать: ' + err.message });
+  }
+});
+
+router.put('/:section/:slug', requireAdmin, ghReady, sectionMw, async (req, res) => {
+  const b = req.body || {};
+  const err = validateFields(b);
+  if (err) return res.status(400).json({ error: err });
+  const section = req.params.section;
+  const slug = req.params.slug;
+  try {
+    const html = await getFile(`${req.section.dir}/${slug}.html`);
+    if (!html) return res.status(404).json({ error: 'Не найдено' });
+    const split = splitArticle(html);
+    if (!split) return res.status(500).json({ error: 'Не удалось разобрать структуру файла' });
+
+    const f = {
+      slug, section, title: b.title.trim(), description: (b.description || '').trim(), category: b.category.trim(),
+      ogImage: b.ogImage || '', publishedDate: b.publishedDate, cardTitle: b.title.trim(),
+      excerpt: (b.excerpt || '').trim(), icon: b.icon || 'grid', readingTime: readingTimeMinutes(b.bodyHtml),
+      cardClass: req.section.cardClass,
+    };
+    let articleHtml = buildArticleHtml({ f, body: b.bodyHtml, tail: split.tail, head: split.head });
+    const nowDraft = !!b.draft;
+    articleHtml = nowDraft ? insertNoindex(articleHtml) : removeNoindex(articleHtml);
+
+    const commitPayload = { [`${req.section.dir}/${slug}.html`]: articleHtml };
+    const [indexHtml, homeHtml, sitemapXml, feedXml] = await Promise.all([
+      getFile(req.section.index), req.section.homeSync ? getFile(HOME_INDEX) : null, getFile(SITEMAP_PATH), getFile(FEED_PATH),
+    ]);
+    if (nowDraft) {
+      if (indexHtml) commitPayload[req.section.index] = removeCard(indexHtml, slug, req.section.cardClass);
+      if (req.section.homeSync && homeHtml) commitPayload[HOME_INDEX] = removeCard(homeHtml, slug, 'news-card');
+      if (sitemapXml) commitPayload[SITEMAP_PATH] = removeSitemap(sitemapXml, section, slug);
+      if (feedXml) commitPayload[FEED_PATH] = removeFeed(feedXml, section, slug);
+    } else {
+      if (indexHtml) commitPayload[req.section.index] = upsertCard(indexHtml, slug, req.section.cardClass, buildIndexCard(f));
+      if (req.section.homeSync && homeHtml) commitPayload[HOME_INDEX] = capHomeCards(upsertCard(homeHtml, slug, 'news-card', buildHomeCard(f)), HOME_CARDS_LIMIT);
+      if (sitemapXml) commitPayload[SITEMAP_PATH] = upsertSitemap(sitemapXml, section, slug);
+      if (feedXml) commitPayload[FEED_PATH] = upsertFeed(feedXml, section, f);
+    }
+    await commitFiles(commitPayload, `Блог: правки «${f.title}» (${section})`);
+    delete listCache[section];
+    res.json({ ok: true, slug });
+  } catch (err) {
+    console.error('blog-cms PUT /:section/:slug:', err);
+    res.status(500).json({ error: 'Не удалось сохранить: ' + err.message });
+  }
+});
+
+router.delete('/:section/:slug', requireAdmin, ghReady, sectionMw, async (req, res) => {
+  const section = req.params.section;
+  const slug = req.params.slug;
+  try {
+    if (!(await getFile(`${req.section.dir}/${slug}.html`))) return res.status(404).json({ error: 'Не найдено' });
+    const [indexHtml, homeHtml, sitemapXml, feedXml] = await Promise.all([
+      getFile(req.section.index), req.section.homeSync ? getFile(HOME_INDEX) : null, getFile(SITEMAP_PATH), getFile(FEED_PATH),
+    ]);
+    const commitPayload = { [`${req.section.dir}/${slug}.html`]: null };
+    if (indexHtml) commitPayload[req.section.index] = removeCard(indexHtml, slug, req.section.cardClass);
+    if (req.section.homeSync && homeHtml) commitPayload[HOME_INDEX] = removeCard(homeHtml, slug, 'news-card');
+    if (sitemapXml) commitPayload[SITEMAP_PATH] = removeSitemap(sitemapXml, section, slug);
+    if (feedXml) commitPayload[FEED_PATH] = removeFeed(feedXml, section, slug);
+    await commitFiles(commitPayload, `Блог: удалено «${slug}» (${section})`);
+    delete listCache[section];
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('blog-cms DELETE /:section/:slug:', err);
+    res.status(500).json({ error: 'Не удалось удалить: ' + err.message });
+  }
+});
+
+
 module.exports = router;
+module.exports.checkAndPublishDueDrafts = checkAndPublishDueDrafts;
