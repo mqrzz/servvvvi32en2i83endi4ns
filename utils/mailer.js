@@ -212,6 +212,31 @@ async function sendNewOrderEmail(toEmail, { orderId, packageName, totalPrice, pa
   });
 }
 
+// ── Письмо-дубль уведомления из кабинета (только если пользователь включил канал e-mail в настройках) ──
+function escHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+async function sendNotificationEmail(toEmail, { title, text, buttonText, buttonUrl }) {
+  const safeTitle = escHtml(title);
+  const html = wrapEmail({
+    heading: safeTitle,
+    bodyHtml: `
+      ${text ? `<p>${escHtml(text).replace(/\n/g, '<br/>')}</p>` : ''}
+      ${buttonUrl ? `<div style="margin-top:8px;">${button(escHtml(buttonText || 'Открыть'), buttonUrl)}</div>` : ''}
+    `,
+    footerNote: 'Antviz &middot; antviz.ru<br/>Это письмо пришло, потому что вы включили e-mail-уведомления в настройках кабинета.',
+  });
+
+  await transporter.sendMail({
+    from: process.env.MAIL_FROM,
+    to: toEmail,
+    subject: String(title || 'Уведомление Antviz').slice(0, 150),
+    html,
+    attachments: baseAttachments(),
+  });
+}
+
 module.exports = {
   transporter, // используется routes/inbound-email.js для ответов из почты поддержки (с вложениями/заголовками треда)
   wrapEmail, // фирменный каркас письма (лого, соцсети, футер) — используется и для ответов из почты поддержки
@@ -220,6 +245,7 @@ module.exports = {
   sendNewDeviceLoginEmail,
   sendAccountDeletedEmail,
   sendNewOrderEmail,
+  sendNotificationEmail,
   sendStatusSubscribedEmail,
   sendIncidentUpdateEmail,
   sendEnterpriseApplicationAdminEmail,
