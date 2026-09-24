@@ -7,8 +7,7 @@
 // у пользователя подключён (notifyTelegram сама тихо пропускает тех, у
 // кого Telegram не привязан — это не ошибка).
 const pool = require('../db/pool');
-const { notifyTelegram } = require('./notifyTelegram');
-const { pruneOldNotifications } = require('./notifications');
+const { deliverNotifications } = require('./notify');
 
 const WARNING_WINDOW_DAYS = 3;
 
@@ -36,20 +35,18 @@ async function checkExpiringSubscriptions() {
     const text = `Подписка на обслуживание для ${label} истекает через ${daysLeft} ${daysLeft === 1 ? 'день' : 'дн.'}. Продлите заранее, чтобы не потерять лимит заявок на доработки.`;
 
     try {
-      await pool.query(
-        'INSERT INTO notifications (user_id, title, text) VALUES ($1,$2,$3)',
-        [s.user_id, title, text]
-      );
-      await pruneOldNotifications(s.user_id);
+      // Уведомление в кабинет + Telegram/e-mail — по настройкам пользователя (utils/notify.js)
+      await deliverNotifications([s.user_id], {
+        title, text,
+        type: 'service',
+        link: '/profile/tickets',
+        buttonText: 'Продлить',
+        buttonUrl: 'https://antviz.ru/profile/tickets',
+      });
       await pool.query(
         'UPDATE service_subscriptions SET expiry_notified_at = now() WHERE id = $1',
         [s.id]
       );
-      notifyTelegram(s.user_id, {
-        title, text,
-        buttonText: 'Продлить',
-        buttonUrl: 'https://antviz.ru/profile/tickets.html',
-      });
     } catch (err) {
       console.error('checkExpiringSubscriptions: не удалось уведомить по подписке', s.id, err);
     }
