@@ -165,6 +165,17 @@ router.post('/:id/messages', requireAuth, async (req, res) => {
     // и это имеет приоритет — но подделать это может только тот, у кого
     // реально role='admin' в базе.
     const sender = (asAdmin && isAdmin) ? 'admin' : 'user';
+
+    // ВАЖНО: раньше сообщение от клиента в закрытый тикет тихо переоткрывало
+    // его ('status = open' ниже). Теперь по просьбе — закрытый тикет для
+    // клиента доступен только на чтение + оценку; чтобы продолжить разговор,
+    // нужно явно создать новый тикет. Админ по-прежнему может писать в
+    // закрытый тикет как раньше — это не менялось, ветка ниже (sender==='admin')
+    // как и была, переоткрывает тикет.
+    if (sender === 'user' && ticket.status === 'done') {
+      return res.status(403).json({ error: 'Тикет закрыт. Создайте новый, чтобы продолжить разговор.' });
+    }
+
     const { rows } = await pool.query(
       `INSERT INTO ticket_messages (ticket_id, sender, text, image_url, file_name, file_mime, file_size, file_data)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING ${MESSAGE_COLS}`,

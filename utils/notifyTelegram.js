@@ -28,7 +28,11 @@ async function notifyTelegram(userId, { title, text, buttonText, buttonUrl } = {
       finalButtonUrl = `https://antviz.ru/tg-enter.html?t=${code}&to=${encodeURIComponent(buttonUrl)}`;
     }
 
-    await fetch(BOT_NOTIFY_URL, {
+    if (!process.env.BOT_API_SECRET) {
+      console.error('notifyTelegram: BOT_API_SECRET не задан на бэкенде — сообщение НЕ будет доставлено боту');
+    }
+
+    const resp = await fetch(BOT_NOTIFY_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Bot-Secret': process.env.BOT_API_SECRET },
       body: JSON.stringify({
@@ -38,6 +42,14 @@ async function notifyTelegram(userId, { title, text, buttonText, buttonUrl } = {
         buttonWebApp: true,
       }),
     });
+
+    // Раньше ответ бота вообще не проверялся — 401 (BOT_API_SECRET не совпадает
+    // между бэкендом и Vercel-ботом) или любая другая ошибка терялись молча, и
+    // в логах не оставалось ни следа. Теперь сбой минимум виден в journalctl.
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '');
+      console.error('notifyTelegram: бот вернул ошибку', resp.status, body, 'для пользователя', userId);
+    }
   } catch (err) {
     console.error('notifyTelegram failed for user', userId, err);
   }

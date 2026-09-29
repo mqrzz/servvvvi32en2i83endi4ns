@@ -514,6 +514,42 @@ router.post('/incidents/:id/updates', requireAdmin, async (req, res) => {
   }
 });
 
+// ── PATCH /api/status/incidents/:id ── тихо поправить текст задним числом (например
+// «на самом деле это был ложный автоматический сбой») — БЕЗ рассылки подписчикам,
+// это правка уже случившейся истории, а не новое событие для timeline.
+router.patch('/incidents/:id', requireAdmin, async (req, res) => {
+  try {
+    const { title, severity, message } = req.body || {};
+    if (severity !== undefined && !SEVERITIES.includes(severity)) {
+      return res.status(400).json({ error: 'Некорректная серьёзность' });
+    }
+
+    const { rows: incRows } = await pool.query('SELECT * FROM status_incidents WHERE id = $1', [req.params.id]);
+    if (incRows.length === 0) return res.status(404).json({ error: 'Инцидент не найден' });
+
+    if (title !== undefined || severity !== undefined) {
+      await pool.query(
+        `UPDATE status_incidents SET title = COALESCE($1, title), severity = COALESCE($2, severity) WHERE id = $3`,
+        [title ?? null, severity ?? null, req.params.id]
+      );
+    }
+
+    if (message !== undefined) {
+      // правим самую первую запись таймлайна — то, с чего инцидент начался
+      await pool.query(
+        `UPDATE status_incident_updates SET message = $1
+         WHERE id = (SELECT id FROM status_incident_updates WHERE incident_id = $2 ORDER BY created_at ASC LIMIT 1)`,
+        [message, req.params.id]
+      );
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('PATCH /api/status/incidents/:id error:', err);
+    res.status(500).json({ error: 'Не удалось изменить инцидент' });
+  }
+});
+
 // ── DELETE /api/status/incidents/:id ── удалить инцидент целиком (например, создан по ошибке) ──
 router.delete('/incidents/:id', requireAdmin, async (req, res) => {
   await pool.query('DELETE FROM status_incidents WHERE id = $1', [req.params.id]);

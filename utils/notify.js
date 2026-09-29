@@ -17,7 +17,7 @@ const DEFAULT_CHANNELS = { telegram: true, email: false };
 
 const DEFAULT_LINKS = {
   order: '/profile/orders',
-  support: '/profile/support',
+  support: '/profile/support/',
   service: '/profile/tickets',
   system: '/profile/notifications',
 };

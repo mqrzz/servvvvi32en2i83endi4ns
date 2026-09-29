@@ -313,4 +313,60 @@ router.post('/compose', requireAdmin, wrap(async (req, res) => {
   res.json(toClientEmail(rows[0]));
 }));
 
+// ── POST /api/inbound-email/broadcast ── письмо всем пользователям сразу ──
+// Используется кнопкой "Рассылка всем" в admin/mail.html — тот же шаблон/редактор,
+// что и у обычного письма, просто получатель не один, а вся таблица users.
+// Не пишем по строке в support_emails на каждого адресата (это тысячи строк ради
+// рассылки, а не переписки) — только одна сводная запись для истории.
+router.post('/broadcast', requireAdmin, wrap(async (req, res) => {
+  const b = req.body || {};
+  const subject = (b.subject || '').trim();
+  const bodyHtml = b.bodyHtml || '';
+  if (!subject) return res.status(400).json({ error: 'Укажите тему письма' });
+  if (!bodyHtml.trim() && !(b.bodyText || '').trim()) return res.status(400).json({ error: 'Пустое письмо' });
+
+  const attachments = Array.isArray(b.attachments) ? b.attachments : [];
+  if (attachmentsSize(attachments) > MAX_ATTACHMENTS_BYTES) {
+    return res.status(413).json({ error: 'Вложения слишком большие (макс. ~20 МБ)' });
+  }
+
+  const { rows: users } = await pool.query(
+    `SELECT DISTINCT email FROM users WHERE email IS NOT NULL AND email <> ''`
+  );
+  if (users.length === 0) return res.json({ sent: 0, failed: 0, total: 0 });
+
+  const fromAddr = process.env.SUPPORT_MAIL_FROM || process.env.MAIL_FROM;
+  const html = wrapEmail({ heading: subject, bodyHtml: bodyHtml || (b.bodyText || '').replace(/\n/g, '<br/>') });
+  const builtAttachments = [...baseAttachments(), ...buildAttachmentsForSend(attachments)];
+
+  // Шлём не все разом (сотни/тысячи одновременных SMTP-соединений положат
+  // локальный Postfix) — небольшими пачками с паузой между ними.
+  const BATCH_SIZE = 20;
+  let sent = 0, failed = 0;
+  for (let i = 0; i < users.length; i += BATCH_SIZE) {
+    const batch = users.slice(i, i + BATCH_SIZE);
+    const results = await Promise.allSettled(batch.map((u) => transporter.sendMail({
+      from: fromAddr,
+      to: u.email,
+      subject,
+      html,
+      text: b.bodyText || undefined,
+      attachments: builtAttachments,
+    })));
+    results.forEach((r) => { if (r.status === 'fulfilled') sent++; else { failed++; console.error('broadcast: не удалось отправить', r.reason); } });
+    if (i + BATCH_SIZE < users.length) await new Promise((r) => setTimeout(r, 1500));
+  }
+
+  await pool.query(
+    `INSERT INTO support_emails (
+      direction, thread_key, from_email, to_email, subject,
+      body_html, body_text, attachments, admin_id, template_id, is_read
+    ) VALUES ('out','__broadcast__',$1,$2,$3,$4,$5,$6,$7,$8,true)`,
+    [fromAddr, `${users.length} получателей`, subject, bodyHtml || null, b.bodyText || null,
+      JSON.stringify(attachments), req.user.id, b.templateId || null]
+  ).catch((e) => console.error('broadcast: не удалось записать сводную строку в support_emails:', e));
+
+  res.json({ sent, failed, total: users.length });
+}));
+
 module.exports = router;
