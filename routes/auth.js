@@ -414,6 +414,11 @@ router.post('/login/verify-recovery', verifyCodeLimiter, async (req, res) => {
 router.get('/yandex/start', (req, res) => {
   const state = crypto.randomBytes(16).toString('hex');
   res.cookie('yandex_oauth_state', state, { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 10 * 60 * 1000 });
+  if (req.query.consent === '1') {
+    res.cookie('yandex_consent', '1', { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 10 * 60 * 1000 });
+  } else {
+    res.clearCookie('yandex_consent');
+  }
   res.redirect(getYandexAuthUrl(state));
 });
 
@@ -437,6 +442,8 @@ router.get('/yandex/callback', async (req, res) => {
     const { code, state } = req.query;
     const expectedState = req.cookies?.yandex_oauth_state;
     res.clearCookie('yandex_oauth_state');
+    const hasConsent = req.cookies?.yandex_consent === '1';
+    res.clearCookie('yandex_consent');
     if (!code || !state || state !== expectedState) {
       return res.redirect(`${frontendBase}/auth.html?yandex_error=state`);
     }
@@ -474,6 +481,11 @@ router.get('/yandex/callback', async (req, res) => {
           await client.query('UPDATE users SET yandex_id = $1 WHERE id = $2', [yandexId, byEmail.rows[0].id]);
           user = { ...byEmail.rows[0], yandex_id: yandexId };
         } else {
+          if (!hasConsent) {
+            await client.query('ROLLBACK');
+            client.release();
+            return res.redirect(`${frontendBase}/auth.html?yandex_error=need_consent`);
+          }
           const inserted = await client.query(
             `INSERT INTO users (email, display_name, email_verified, yandex_id) VALUES ($1, $2, TRUE, $3) RETURNING *`,
             [email, displayName, yandexId]
