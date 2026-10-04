@@ -7,9 +7,6 @@ const router = express.Router();
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-// Общий лимит на суммарный объём вложений в одном письме — тот же порядок
-// величин, что и у order/index.html (30mb на весь JSON-body), но с запасом
-// под заголовки/остальные поля письма.
 const MAX_ATTACHMENTS_BYTES = 20 * 1024 * 1024;
 
 function wrap(fn) {
@@ -19,9 +16,6 @@ function wrap(fn) {
   });
 }
 
-// ── Секрет для вебхука Cloudflare Email Worker'а ──
-// Та же схема, что уже используется для бота (X-Bot-Secret) и ЮKassa
-// (X-Payment-Secret) — сервер-сервер запрос без пользовательской сессии.
 function requireInboundSecret(req, res, next) {
   const secret = req.headers['x-inbound-secret'];
   if (!secret || secret !== process.env.INBOUND_EMAIL_SECRET) {
@@ -35,12 +29,6 @@ function attachmentsSize(list) {
   return list.reduce((sum, a) => sum + Math.ceil(((a && a.data) || '').length * 0.75), 0);
 }
 
-// Лёгкая версия для списка сообщений треда: БЕЗ base64 в attachments[].data.
-// Раньше GET /threads/:key отдавал ответ через toClientEmail(), который включал
-// attachments целиком (вложения хранятся в БД как base64 data URL, до 20 МБ на письмо) —
-// для контакта с длинной перепиской и парой скриншотов это были сотни мегабайт JSON
-// за один открытие треда: вкладка зависала, скроллить и читать было невозможно.
-// Теперь тут только метаданные, сами байты отдаёт отдельный эндпоинт ниже.
 function toClientEmailLight(e) {
   return {
     id: e.id,
@@ -83,10 +71,6 @@ function toClientEmail(e) {
   };
 }
 
-// ── POST /api/inbound-email ── вебхук от Cloudflare Email Worker'а ──
-// Форвардинг support@antviz.ru на личную почту в Cloudflare Email Routing
-// остаётся отдельным, независимым действием того же правила — сюда прилетает
-// копия письма вторым действием ("Send to a Worker"), ничего не меняя в старом канале.
 router.post('/', requireInboundSecret, wrap(async (req, res) => {
   const b = req.body || {};
   const fromEmail = String(b.fromEmail || '').trim().toLowerCase();
@@ -114,7 +98,6 @@ router.post('/', requireInboundSecret, wrap(async (req, res) => {
   res.json({ ok: true, id: rows[0].id });
 }));
 
-// ── GET /api/inbound-email/threads ── список тредов для списка в админке ──
 router.get('/threads', requireAdmin, wrap(async (req, res) => {
   const { rows } = await pool.query(`
     SELECT
@@ -142,28 +125,23 @@ router.get('/threads', requireAdmin, wrap(async (req, res) => {
   })));
 }));
 
-// ── GET /api/inbound-email/threads/:key ── вся переписка треда, помечает входящие прочитанными ──
 router.get('/threads/:key', requireAdmin, wrap(async (req, res) => {
   const key = req.params.key.toLowerCase();
-  // limit/before — курсорная пагинация по created_at (страница за страницей, от новых к старым).
-  // Без неё контакт с длинной перепиской отдавал всю историю одним запросом — см. toClientEmailLight выше.
   const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 100);
   const before = req.query.before || null;
 
   const params = [key];
   let where = 'thread_key = $1';
   if (before) { params.push(before); where += ` AND created_at < $${params.length}`; }
-  params.push(limit + 1); // +1 — чтобы понять, есть ли ещё более старые письма, не делая отдельный COUNT
+  params.push(limit + 1);
 
   const { rows } = await pool.query(
     `SELECT * FROM support_emails WHERE ${where} ORDER BY created_at DESC LIMIT $${params.length}`,
     params
   );
   const hasMore = rows.length > limit;
-  const page = rows.slice(0, limit).reverse(); // обратно в хронологический порядок для рендера
+  const page = rows.slice(0, limit).reverse();
 
-  // Читаем весь тред целиком (не только показанную страницу) — открыл тред, значит увидел все непрочитанные,
-  // даже если старые письма ещё не подгружены кнопкой «показать более старые».
   pool.query(
     "UPDATE support_emails SET is_read = true WHERE thread_key = $1 AND direction = 'in' AND is_read = false",
     [key]
@@ -172,8 +150,6 @@ router.get('/threads/:key', requireAdmin, wrap(async (req, res) => {
   res.json({ messages: page.map(toClientEmailLight), hasMore });
 }));
 
-// ── GET /api/inbound-email/threads/:key/messages/:id/attachments/:index ── байты одного вложения ──
-// Вместо base64 внутри общего списка писем (см. выше) — отдаём по требованию, как файлы в тикетах поддержки.
 router.get('/threads/:key/messages/:id/attachments/:index', requireAdmin, wrap(async (req, res) => {
   const key = req.params.key.toLowerCase();
   const { rows } = await pool.query(
@@ -195,7 +171,6 @@ router.get('/threads/:key/messages/:id/attachments/:index', requireAdmin, wrap(a
   res.send(buf);
 }));
 
-// ── DELETE /api/inbound-email/threads/:key ── удалить всю переписку с адресом ──
 router.delete('/threads/:key', requireAdmin, wrap(async (req, res) => {
   const key = req.params.key.toLowerCase();
   await pool.query('DELETE FROM support_emails WHERE thread_key = $1', [key]);
@@ -214,7 +189,6 @@ function buildAttachmentsForSend(list) {
   });
 }
 
-// ── POST /api/inbound-email/threads/:key/reply ── ответ в существующий тред ──
 router.post('/threads/:key/reply', requireAdmin, wrap(async (req, res) => {
   const key = req.params.key.toLowerCase();
   const b = req.body || {};
@@ -228,9 +202,6 @@ router.post('/threads/:key/reply', requireAdmin, wrap(async (req, res) => {
     return res.status(413).json({ error: 'Вложения слишком большие (макс. ~20 МБ)' });
   }
 
-  // Последнее входящее письмо треда — чтобы ответ склеился в тот же тред
-  // у получателя (In-Reply-To/References) и чтобы знать, куда слать, если
-  // toEmail явно не передан.
   const { rows: lastInRows } = await pool.query(
     "SELECT * FROM support_emails WHERE thread_key = $1 AND direction = 'in' ORDER BY created_at DESC LIMIT 1",
     [key]
@@ -245,9 +216,6 @@ router.post('/threads/:key/reply', requireAdmin, wrap(async (req, res) => {
     from: fromAddr,
     to: toEmail,
     subject: sendSubject,
-    // Фирменный каркас (лого, соцсети, футер) — тот же, что и у остальных писем
-    // Antviz. В базе/на экране админки хранится и показывается обычный
-    // bodyHtml без брендинга (ниже, в INSERT) — обёртка нужна только на отправке.
     html: wrapEmail({ heading: sendSubject || 'Ответ от Antviz', bodyHtml: bodyHtml || (b.bodyText || '').replace(/\n/g, '<br/>') }),
     text: b.bodyText || undefined,
     attachments: [...baseAttachments(), ...buildAttachmentsForSend(attachments)],
@@ -272,7 +240,6 @@ router.post('/threads/:key/reply', requireAdmin, wrap(async (req, res) => {
   res.json(toClientEmail(rows[0]));
 }));
 
-// ── POST /api/inbound-email/compose ── новое письмо (не ответ на существующий тред) ──
 router.post('/compose', requireAdmin, wrap(async (req, res) => {
   const b = req.body || {};
   const toEmail = (b.toEmail || '').trim().toLowerCase();
@@ -313,11 +280,6 @@ router.post('/compose', requireAdmin, wrap(async (req, res) => {
   res.json(toClientEmail(rows[0]));
 }));
 
-// ── POST /api/inbound-email/broadcast ── письмо всем пользователям сразу ──
-// Используется кнопкой "Рассылка всем" в admin/mail.html — тот же шаблон/редактор,
-// что и у обычного письма, просто получатель не один, а вся таблица users.
-// Не пишем по строке в support_emails на каждого адресата (это тысячи строк ради
-// рассылки, а не переписки) — только одна сводная запись для истории.
 router.post('/broadcast', requireAdmin, wrap(async (req, res) => {
   const b = req.body || {};
   const subject = (b.subject || '').trim();
@@ -339,8 +301,6 @@ router.post('/broadcast', requireAdmin, wrap(async (req, res) => {
   const html = wrapEmail({ heading: subject, bodyHtml: bodyHtml || (b.bodyText || '').replace(/\n/g, '<br/>') });
   const builtAttachments = [...baseAttachments(), ...buildAttachmentsForSend(attachments)];
 
-  // Шлём не все разом (сотни/тысячи одновременных SMTP-соединений положат
-  // локальный Postfix) — небольшими пачками с паузой между ними.
   const BATCH_SIZE = 20;
   let sent = 0, failed = 0;
   for (let i = 0; i < users.length; i += BATCH_SIZE) {

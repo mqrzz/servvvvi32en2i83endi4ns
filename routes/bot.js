@@ -6,10 +6,6 @@ const { toClientOrder } = require('./orders');
 
 const router = express.Router();
 
-// ── Доступ только для бота (Vercel-функции), общий секрет в заголовке ──
-// Та же схема, что уже используется для вебхука ЮKассы (X-Payment-Secret) —
-// у бота нет "текущего пользователя" в смысле cookie-сессии, поэтому
-// авторизация на уровне сервер-сервер, а не через requireAuth/service-token.
 function requireBotSecret(req, res, next) {
   const secret = req.headers['x-bot-secret'];
   if (!secret || secret !== process.env.BOT_API_SECRET) {
@@ -19,10 +15,6 @@ function requireBotSecret(req, res, next) {
 }
 router.use(requireBotSecret);
 
-// Обёртка вместо ручного try/catch в каждом роуте — именно из-за пропущенного
-// try/catch завис запрос "Привязать Telegram" в настройках. Дальше уже
-// невозможно забыть его добавить, потому что все роуты ниже проходят через
-// неё одинаково.
 function wrap(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch((err) => {
     console.error(`bot.js ${req.method} ${req.path}:`, err);
@@ -36,8 +28,6 @@ function toClientNotification(n) {
   return { id: n.id, title: n.title, text: n.text, read: n.is_read, createdAt: n.created_at };
 }
 
-// ── POST /api/bot/link ── привязка аккаунта по токену из личного кабинета
-// Тело: { token, chatId, username }
 router.post('/link', wrap(async (req, res) => {
   const { token, chatId, username } = req.body || {};
   if (!token || !chatId) return res.status(400).json({ error: 'token и chatId обязательны' });
@@ -48,7 +38,7 @@ router.post('/link', wrap(async (req, res) => {
   );
   if (rows.length === 0) return res.status(404).json({ error: 'invalid_token' });
   const tok = rows[0];
-  await pool.query('DELETE FROM bot_tokens WHERE token = $1', [token]); // одноразовый — сразу гасим
+  await pool.query('DELETE FROM bot_tokens WHERE token = $1', [token]);
 
   if (new Date(tok.expires_at) < new Date()) return res.status(410).json({ error: 'expired_token' });
 
@@ -62,7 +52,6 @@ router.post('/link', wrap(async (req, res) => {
   res.json({ uid: u.id, displayName: u.display_name, isAdmin: u.role === 'admin' });
 }));
 
-// ── POST /api/bot/unlink ── отвязка по chatId (кнопка "Отвязать" в боте)
 router.post('/unlink', wrap(async (req, res) => {
   const { chatId } = req.body || {};
   if (!chatId) return res.status(400).json({ error: 'chatId обязателен' });
@@ -73,7 +62,6 @@ router.post('/unlink', wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
-// ── GET /api/bot/user-by-chat/:chatId ── найти uid по chatId (аналог findUidByChat)
 router.get('/user-by-chat/:chatId', wrap(async (req, res) => {
   const { rows } = await pool.query(
     'SELECT id, display_name, role FROM users WHERE telegram_id = $1',
@@ -84,9 +72,6 @@ router.get('/user-by-chat/:chatId', wrap(async (req, res) => {
   res.json({ uid: u.id, displayName: u.display_name, isAdmin: u.role === 'admin' });
 }));
 
-// ── POST /api/bot/app-link-code ── одноразовый код для входа в мини-апп из бота
-// Тело: { uid } → { code }. tg-enter.html обменивает code на реальную сессию
-// через POST /api/auth/bot-login (там же, на antviz-backend, не через бота).
 router.post('/app-link-code', wrap(async (req, res) => {
   const { uid } = req.body || {};
   if (!uid) return res.status(400).json({ error: 'uid обязателен' });
@@ -98,9 +83,6 @@ router.post('/app-link-code', wrap(async (req, res) => {
   res.json({ code });
 }));
 
-// ── POST /api/bot/service-token ── короткоживущий токен для оплаты от лица юзера
-// (та же механика, что POST /api/auth/service-token для браузера, только тут
-// личность подтверждает не cookie-сессия, а секрет бота + прямое указание uid)
 router.post('/service-token', wrap(async (req, res) => {
   const { uid } = req.body || {};
   if (!uid) return res.status(400).json({ error: 'uid обязателен' });
@@ -109,7 +91,6 @@ router.post('/service-token', wrap(async (req, res) => {
   res.json({ token: signServiceToken(uid) });
 }));
 
-// ── GET /api/bot/profile-summary/:uid ── сводка для шапки "Профиль" в боте
 router.get('/profile-summary/:uid', wrap(async (req, res) => {
   const { uid } = req.params;
   const { rows: uRows } = await pool.query('SELECT display_name FROM users WHERE id = $1', [uid]);
@@ -126,7 +107,6 @@ router.get('/profile-summary/:uid', wrap(async (req, res) => {
   res.json({ displayName: uRows[0].display_name, activeOrders, supportSites });
 }));
 
-// ── GET /api/bot/orders?uid=&status=&limit= ── список заказов юзера
 router.get('/orders', wrap(async (req, res) => {
   const { uid, status, limit } = req.query;
   if (!uid) return res.status(400).json({ error: 'uid обязателен' });
@@ -139,7 +119,6 @@ router.get('/orders', wrap(async (req, res) => {
   res.json(rows.map(toClientOrder));
 }));
 
-// ── GET /api/bot/orders/:id?uid= ── один заказ, с проверкой владельца
 router.get('/orders/:id', wrap(async (req, res) => {
   const { uid } = req.query;
   const { rows } = await pool.query('SELECT * FROM orders WHERE id = $1', [req.params.id]);
@@ -148,7 +127,6 @@ router.get('/orders/:id', wrap(async (req, res) => {
   res.json(toClientOrder(rows[0]));
 }));
 
-// ── GET /api/bot/notifications?uid=&limit= ──
 router.get('/notifications', wrap(async (req, res) => {
   const { uid, limit } = req.query;
   if (!uid) return res.status(400).json({ error: 'uid обязателен' });
@@ -159,7 +137,6 @@ router.get('/notifications', wrap(async (req, res) => {
   res.json(rows.map(toClientNotification));
 }));
 
-// ── GET /api/bot/stats ── агрегированная статистика для админ-меню бота
 router.get('/stats', wrap(async (req, res) => {
   const { rows: statusRows } = await pool.query('SELECT status, COUNT(*)::int AS c FROM orders GROUP BY status');
   const counts = { total: 0, waitingPay: 0, waitingTop: 0, done: 0, active: 0 };
@@ -174,15 +151,11 @@ router.get('/stats', wrap(async (req, res) => {
   res.json({ ...counts, linked: linkedRows[0].c });
 }));
 
-// ── GET /api/bot/broadcast-targets ── все chatId привязанных пользователей
 router.get('/broadcast-targets', wrap(async (req, res) => {
   const { rows } = await pool.query('SELECT id, telegram_id FROM users WHERE telegram_id IS NOT NULL');
   res.json(rows.map(r => ({ uid: r.id, chatId: r.telegram_id })));
 }));
 
-// ── GET/POST /api/bot/kv/:key ── простое key-value для состояния бота
-// (техработы бота, "жду текст рассылки от админа" — на Vercel нет своего
-// файлового хранилища как .maintenance на VPS, поэтому храним в БД)
 router.get('/kv/:key', wrap(async (req, res) => {
   const { rows } = await pool.query('SELECT value FROM kv_settings WHERE key = $1', [req.params.key]);
   res.json({ value: rows.length ? rows[0].value : null });
@@ -201,8 +174,6 @@ router.delete('/kv/:key', wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
-// ── GET /api/bot/tg-chat-for-user/:uid ── telegram_id по uid (для notify.js —
-// после того как он сам проверил через /api/auth/whoami, что зовущий админ)
 router.get('/tg-chat-for-user/:uid', wrap(async (req, res) => {
   const { rows } = await pool.query('SELECT telegram_id FROM users WHERE id = $1', [req.params.uid]);
   if (rows.length === 0) return res.status(404).json({ error: 'user_not_found' });

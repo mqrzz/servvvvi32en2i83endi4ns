@@ -22,6 +22,7 @@ const {
 const { getYandexAuthUrl, exchangeYandexCode, fetchYandexUser } = require('../utils/yandex');
 
 const router = express.Router();
+const { logConsent } = require('../utils/consent');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const disposableSet = new Set(disposableDomains);
@@ -77,22 +78,21 @@ function publicUser(user) {
   return { id: user.id, email: user.email, displayName: user.display_name, photoUrl: user.photo_url, role: user.role };
 }
 
-// Генерирует ОДИН резервный код (не пачку), хэширует и сохраняет.
-// Возвращает исходный код — показать юзеру ровно один раз.
 async function issueRecoveryCode(client, userId) {
-  const code = crypto.randomBytes(5).toString('hex').toUpperCase().match(/.{1,4}/g).join('-'); // напр. "A1B2-C3D4-E5"
+  const code = crypto.randomBytes(5).toString('hex').toUpperCase().match(/.{1,4}/g).join('-');
   const hash = hashCode(code);
   await client.query('UPDATE users SET recovery_code_hash = $1, recovery_code_created_at = now() WHERE id = $2', [hash, userId]);
   return code;
 }
 
-// ── POST /api/auth/register ── создать аккаунт (email не подтверждён), отправить код
-// Пароль больше не запрашиваем — только имя и email.
 router.post('/register', sendCodeLimiter, async (req, res) => {
   try {
-    const { name, email } = req.body;
+    const { name, email, consent } = req.body;
     if (!email || !EMAIL_RE.test(email)) {
       return res.status(400).json({ error: 'Некорректный email' });
+    }
+    if (consent !== true) {
+      return res.status(400).json({ error: 'Нужно дать согласие на обработку персональных данных' });
     }
     if (isDisposableEmail(email)) {
       return res.status(400).json({ error: 'Временные (одноразовые) email не поддерживаются, укажите постоянный адрес' });
@@ -104,14 +104,18 @@ router.post('/register', sendCodeLimiter, async (req, res) => {
       return res.status(409).json({ error: 'Пользователь с таким email уже зарегистрирован, войдите' });
     }
 
+    let registeringUserId;
     if (existing.rows.length > 0) {
-      await pool.query('UPDATE users SET display_name = $1 WHERE id = $2', [name?.trim() || 'Пользователь', existing.rows[0].id]);
+      registeringUserId = existing.rows[0].id;
+      await pool.query('UPDATE users SET display_name = $1 WHERE id = $2', [name?.trim() || 'Пользователь', registeringUserId]);
     } else {
-      await pool.query(
-        `INSERT INTO users (email, display_name, email_verified) VALUES ($1, $2, FALSE)`,
+      const created = await pool.query(
+        `INSERT INTO users (email, display_name, email_verified) VALUES ($1, $2, FALSE) RETURNING id`,
         [normalizedEmail, name?.trim() || 'Пользователь']
       );
+      registeringUserId = created.rows[0].id;
     }
+    await logConsent(registeringUserId, ['pd'], req, 'register_form');
 
     const code = generateCode();
     const codeHash = hashCode(code);
@@ -129,7 +133,6 @@ router.post('/register', sendCodeLimiter, async (req, res) => {
   }
 });
 
-// ── POST /api/auth/register/verify ── подтвердить email кодом, войти
 router.post('/register/verify', verifyCodeLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -186,13 +189,7 @@ router.post('/register/verify', verifyCodeLimiter, async (req, res) => {
   }
 });
 
-// =====================================================
-// ВХОД — email обязателен как идентификатор на первом шаге
-// (сам вход дальше может быть кодом с почты, TOTP или резервным кодом)
-// =====================================================
 
-// ── POST /api/auth/login/start ── ПРОВЕРИТЬ аккаунт и способы входа, письмо НЕ шлём.
-// Фронт по ответу решает: показать выбор способа или сразу слать код (если выбирать не из чего).
 router.post('/login/start', verifyCodeLimiter, async (req, res) => {
   try {
     const { email } = req.body;
@@ -221,9 +218,6 @@ router.post('/login/start', verifyCodeLimiter, async (req, res) => {
   }
 });
 
-// ── POST /api/auth/login/send-code ── реально отправить код на почту
-// (вызывается либо сразу, если у аккаунта нет других способов входа,
-// либо когда человек сам нажал «Получить код на почту», либо на «Отправить ещё раз»)
 router.post('/login/send-code', sendCodeLimiter, async (req, res) => {
   try {
     const { email } = req.body;
@@ -241,9 +235,6 @@ router.post('/login/send-code', sendCodeLimiter, async (req, res) => {
       [normalizedEmail, codeHash, expiresAt, req.ip]
     );
 
-    // Магическая ссылка — тот же код входа, просто ещё и одноразовый токен-ссылка
-    // рядом в письме. Раздельная запись в auth_codes с отдельным purpose, чтобы
-    // код и ссылка были независимы (использовал одно — второе всё ещё живо).
     const magicToken = crypto.randomBytes(24).toString('base64url');
     await pool.query(
       `INSERT INTO auth_codes (email, code_hash, purpose, expires_at, ip_address) VALUES ($1, $2, 'login_magic', $3, $4)`,
@@ -260,7 +251,6 @@ router.post('/login/send-code', sendCodeLimiter, async (req, res) => {
   }
 });
 
-// ── GET /api/auth/login/magic ── переход по ссылке из письма — входит одним кликом
 router.get('/login/magic', async (req, res) => {
   const frontendBase = process.env.FRONTEND_ORIGIN || 'https://antviz.ru';
   const client = await pool.connect();
@@ -346,7 +336,6 @@ async function finishCodeLogin(req, res, { normalizedEmail, purpose, verifyField
   }
 }
 
-// ── POST /api/auth/login/verify-code ── вход кодом с почты (основной способ)
 router.post('/login/verify-code', verifyCodeLimiter, async (req, res) => {
   const { email, code } = req.body;
   if (!email || !code) return res.status(400).json({ error: 'Email и код обязательны' });
@@ -383,8 +372,6 @@ router.post('/login/verify-code', verifyCodeLimiter, async (req, res) => {
   return finishCodeLogin(req, res, { normalizedEmail, purpose: 'email-code' });
 });
 
-// ── POST /api/auth/login/verify-totp ── вход кодом из Authenticator вместо почты
-// (на случай, если человек не может получить письмо, но помнит email и телефон с ним)
 router.post('/login/verify-totp', verifyCodeLimiter, async (req, res) => {
   const { email, token } = req.body;
   if (!email || !token) return res.status(400).json({ error: 'Email и код обязательны' });
@@ -401,8 +388,6 @@ router.post('/login/verify-totp', verifyCodeLimiter, async (req, res) => {
   return finishCodeLogin(req, res, { normalizedEmail, purpose: 'totp' });
 });
 
-// ── POST /api/auth/login/verify-recovery ── вход резервным кодом (крайний случай:
-// нет доступа ни к почте, ни к Authenticator-устройству). Код одноразовый — сгорает сразу.
 router.post('/login/verify-recovery', verifyCodeLimiter, async (req, res) => {
   const { email, code } = req.body;
   if (!email || !code) return res.status(400).json({ error: 'Email и код обязательны' });
@@ -416,7 +401,6 @@ router.post('/login/verify-recovery', verifyCodeLimiter, async (req, res) => {
     return res.status(400).json({ error: 'Неверный резервный код' });
   }
 
-  // Сжигаем код сразу, вне зависимости от исхода дальше — он одноразовый.
   return finishCodeLogin(req, res, {
     normalizedEmail,
     purpose: 'recovery-code',
@@ -426,12 +410,6 @@ router.post('/login/verify-recovery', verifyCodeLimiter, async (req, res) => {
   });
 });
 
-// =====================================================
-// ЯНДЕКС OAUTH
-// Правило слияния аккаунтов: единственный идентификатор — email.
-// Если Яндекс отдал email, который уже есть в БД — просто привязываем
-// yandex_id к существующему юзеру, а не плодим второй аккаунт.
-// =====================================================
 
 router.get('/yandex/start', (req, res) => {
   const state = crypto.randomBytes(16).toString('hex');
@@ -439,8 +417,6 @@ router.get('/yandex/start', (req, res) => {
   res.redirect(getYandexAuthUrl(state));
 });
 
-// Если у запроса есть валидная cookie сессии — считаем, что это не вход,
-// а привязка Яндекса из настроек уже залогиненным пользователем.
 async function getSessionUser(req) {
   const token = req.cookies?.session;
   if (!token) return null;
@@ -471,7 +447,6 @@ router.get('/yandex/callback', async (req, res) => {
     const email = (yUser.default_email || yUser.emails?.[0] || '').trim().toLowerCase();
     const displayName = yUser.display_name || yUser.real_name || yUser.login || 'Пользователь';
 
-    // ── Режим привязки: юзер уже залогинен и просто добавляет Яндекс из настроек ──
     const sessionUser = await getSessionUser(req);
     if (sessionUser) {
       const clash = await pool.query('SELECT id FROM users WHERE yandex_id = $1 AND id != $2', [yandexId, sessionUser.id]);
@@ -483,10 +458,6 @@ router.get('/yandex/callback', async (req, res) => {
     }
 
     if (!email) {
-      // Яндекс не отдал почту (скрыта настройками приватности) — без email
-      // сливать/создавать аккаунт нельзя, иначе потом эту же почту нельзя
-      // будет корректно привязать. Просим войти email-способом и привязать
-      // Яндекс вручную из настроек, где мы явно попросим разрешить emai.
       return res.redirect(`${frontendBase}/auth.html?yandex_error=no_email`);
     }
 
@@ -500,7 +471,6 @@ router.get('/yandex/callback', async (req, res) => {
       if (!user) {
         const byEmail = await client.query('SELECT * FROM users WHERE email = $1', [email]);
         if (byEmail.rows.length > 0) {
-          // Уже есть аккаунт с этим email (регистрировался через почту) — привязываем Яндекс к нему.
           await client.query('UPDATE users SET yandex_id = $1 WHERE id = $2', [yandexId, byEmail.rows[0].id]);
           user = { ...byEmail.rows[0], yandex_id: yandexId };
         } else {
@@ -510,6 +480,7 @@ router.get('/yandex/callback', async (req, res) => {
           );
           user = inserted.rows[0];
           isNewUser = true;
+          await logConsent(user.id, ['pd'], req, 'yandex_button', client);
         }
       }
 
@@ -542,9 +513,6 @@ router.post('/yandex/unlink', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
-// =====================================================
-// PASSKEY (WebAuthn)
-// =====================================================
 
 const CHALLENGE_TTL_MS = 3 * 60 * 1000;
 
@@ -563,7 +531,6 @@ async function takeChallenge(id, purpose) {
   return rows[0] || null;
 }
 
-// Подключение ключа — только уже залогиненным пользователем, из настроек
 router.post('/passkey/register-options', requireAuth, async (req, res) => {
   try {
     const { rows: existing } = await pool.query('SELECT credential_id FROM passkeys WHERE user_id = $1', [req.user.id]);
@@ -628,7 +595,6 @@ router.delete('/passkey/:id', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
-// Вход по ключу — дискаверабл, без email: браузер сам предлагает сохранённый ключ.
 router.post('/passkey/login-options', async (req, res) => {
   try {
     const options = await generateAuthenticationOptions({
@@ -646,9 +612,6 @@ router.post('/passkey/login-options', async (req, res) => {
   }
 });
 
-// Вход по ключу С email — второй шаг в форме входа (альтернатива коду с почты).
-// Ограничиваем allowCredentials конкретными ключами этого аккаунта — так работает
-// предсказуемо даже там, где дискаверабл-подсказка браузера ведёт себя не идеально.
 router.post('/login/passkey-options', async (req, res) => {
   try {
     const { email } = req.body;
@@ -724,13 +687,7 @@ router.post('/passkey/login-verify', async (req, res) => {
   }
 });
 
-// =====================================================
-// AUTHENTICATOR (TOTP) — 2FA + резервный код
-// =====================================================
 
-// Шаг 1: сгенерировать секрет и QR, но ЕЩЁ НЕ включать — включаем только
-// после подтверждения кодом в /totp/confirm, иначе человек может случайно
-// заблокировать себе вход неправильно отсканированным QR.
 router.post('/totp/setup', requireAuth, async (req, res) => {
   try {
     const secret = totp.generateSecretBase32();
@@ -778,11 +735,6 @@ router.post('/totp/disable', requireAuth, async (req, res) => {
   }
 });
 
-// Выпуск/перевыпуск резервного кода — не зависит от Authenticator.
-// Если 2FA включена — просим текущий TOTP-код для подтверждения (это более
-// чувствительный случай, код может обойти саму 2FA). Если 2FA выключена —
-// выпускаем сразу, сессии (requireAuth) уже достаточно, как и для остальных
-// действий в Настройках.
 router.post('/recovery-code/issue', requireAuth, async (req, res) => {
   try {
     const { token } = req.body;
@@ -798,7 +750,6 @@ router.post('/recovery-code/issue', requireAuth, async (req, res) => {
   }
 });
 
-// ── Отправка кода для прочих целей (сейчас: удаление аккаунта) ──
 router.post('/send-code', sendCodeLimiter, requireAuth, async (req, res) => {
   try {
     const { purpose } = req.body;
@@ -820,14 +771,12 @@ router.post('/send-code', sendCodeLimiter, requireAuth, async (req, res) => {
   }
 });
 
-// ── POST /api/auth/logout ──
 router.post('/logout', requireAuth, async (req, res) => {
   await pool.query('UPDATE sessions SET revoked_at = now() WHERE id = $1', [req.user.session_id]);
   res.clearCookie('session', { domain: '.antviz.ru' });
   res.json({ ok: true });
 });
 
-// ── GET /api/auth/me ──
 router.get('/me', requireAuth, async (req, res) => {
   res.json({
     id: req.user.id,
@@ -842,7 +791,6 @@ router.get('/me', requireAuth, async (req, res) => {
   });
 });
 
-// ── GET /api/auth/security-overview ── список подключённых способов входа для страницы Безопасность
 router.get('/security-overview', requireAuth, async (req, res) => {
   const { rows } = await pool.query(
     'SELECT yandex_id, totp_enabled, recovery_code_hash FROM users WHERE id = $1',
@@ -862,13 +810,11 @@ router.get('/security-overview', requireAuth, async (req, res) => {
   });
 });
 
-// ── POST /api/auth/onboarding-done ──
 router.post('/onboarding-done', requireAuth, async (req, res) => {
   await pool.query('UPDATE users SET onboarding_done = TRUE WHERE id = $1', [req.user.id]);
   res.json({ ok: true });
 });
 
-// ── GET /api/auth/ban-status ──
 router.get('/ban-status', requireAuth, async (req, res) => {
   const { rows } = await pool.query('SELECT * FROM bans WHERE user_id = $1', [req.user.id]);
   if (rows.length === 0) return res.json({ banned: false });
@@ -885,7 +831,6 @@ router.get('/ban-status', requireAuth, async (req, res) => {
   });
 });
 
-// ── PUT /api/auth/profile ──
 router.put('/profile', requireAuth, async (req, res) => {
   const { displayName } = req.body;
   if (!displayName || !displayName.trim()) {
@@ -895,16 +840,11 @@ router.put('/profile', requireAuth, async (req, res) => {
   res.json({ ok: true, displayName: displayName.trim() });
 });
 
-// ── POST /api/auth/delete-account ──
 router.post('/delete-account', verifyCodeLimiter, requireAuth, async (req, res) => {
   try {
     const { code } = req.body;
     if (!code) return res.status(400).json({ error: 'Введите код' });
 
-    // Единственный админ не должен иметь возможность случайно снести себе
-    // админку через обычное самообслуживание в Настройках — админский
-    // DELETE /api/users/:id и так запрещает удалять самого себя, но этот
-    // роут (самостоятельное удаление) той проверки не имел вообще.
     if (req.user.role === 'admin') {
       const { rows: adminCountRows } = await pool.query(`SELECT COUNT(*)::int AS n FROM users WHERE role = 'admin'`);
       if (adminCountRows[0].n <= 1) {
@@ -939,7 +879,6 @@ router.post('/delete-account', verifyCodeLimiter, requireAuth, async (req, res) 
   }
 });
 
-// ── POST /api/auth/service-token ──
 router.post('/service-token', requireAuth, async (req, res) => {
   try {
     res.json({ token: signServiceToken(req.user.id) });
@@ -949,7 +888,6 @@ router.post('/service-token', requireAuth, async (req, res) => {
   }
 });
 
-// ── POST /api/auth/bot-login ── вход из мини-аппа Telegram по одноразовому коду от бота
 router.post('/bot-login', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -992,7 +930,6 @@ router.post('/bot-login', async (req, res) => {
   }
 });
 
-// ── PATCH /api/auth/telegram-link ──
 router.patch('/telegram-link', requireUserOrService, async (req, res) => {
   try {
     const { tgChatId, tgUsername } = req.body || {};

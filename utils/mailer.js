@@ -7,24 +7,15 @@ const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || 'localhost',
   port: Number(process.env.SMTP_PORT || 25),
   secure: Number(process.env.SMTP_PORT || 25) === 465,
-  // Локальный Postfix использует самоподписанный сертификат — это ок,
-  // соединение не покидает сервер (Node.js стучится в Postfix на этом же хосте).
   tls: { rejectUnauthorized: false },
   ...(useAuth
     ? { auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } }
     : {}),
 });
 
-// ── Картинки письма ──
-// Раньше лого и иконки соцсетей рисовались инлайновым <svg> — почтовые клиенты
-// (Gmail, Outlook и т.д.) обрезают <svg> из HTML-писем, поэтому ничего не было видно.
-// Теперь используем готовые PNG и вшиваем их прямо в письмо как cid-вложения
-// (embedded images) — так почтовому клиенту не нужно ничего подгружать по сети,
-// картинка "живёт" внутри самого письма. Файлы берутся с диска бэкенда,
-// из папки img в корне репозитория (../img относительно этого файла в utils/).
 const IMG_DIR = path.join(__dirname, '..', 'img');
 
-const LOGO_FILE = 'logo-white.png'; // белый вариант лого, для тёмной плашки
+const LOGO_FILE = 'logo-white.png';
 const SOCIAL_LINKS = [
   { url: 'https://t.me/antviz_official', file: 'telegram-button.png' },
   { url: 'https://instagram.com/antviz_official', file: 'instagram-button.png' },
@@ -32,7 +23,6 @@ const SOCIAL_LINKS = [
   { url: 'https://threads.com/@antviz_official', file: 'threads-button.png' },
 ];
 
-// Каждому файлу — уникальный cid, чтобы в html сослаться через src="cid:..."
 function cidFor(filename) {
   return filename.replace(/\.[^.]+$/, '');
 }
@@ -42,14 +32,10 @@ function imageAttachment(filename) {
     filename,
     path: path.join(IMG_DIR, filename),
     cid: cidFor(filename),
-    // Без явного contentDisposition nodemailer по умолчанию ставит "attachment",
-    // даже если задан cid — из-за этого Gmail показывает картинку как вложение.
-    // "inline" убирает её из списка приложений, оставляя только встраивание в HTML.
     contentDisposition: 'inline',
   };
 }
 
-// Базовый набор вложений, нужных в любом письме (лого + соцсети)
 function baseAttachments() {
   return [imageAttachment(LOGO_FILE), ...SOCIAL_LINKS.map(({ file }) => imageAttachment(file))];
 }
@@ -66,7 +52,6 @@ function socialRow() {
   return `<table role="presentation" align="center" cellpadding="0" cellspacing="0" style="margin:0 auto;"><tr>${cells}</tr></table>`;
 }
 
-// ── Базовый каркас письма в фирменном стиле Antviz ──
 function wrapEmail({ heading, bodyHtml, footerNote }) {
   return `
   <div style="background:#f2f2f4; padding:32px 16px; font-family:'Geologica',Arial,Helvetica,sans-serif;">
@@ -212,7 +197,6 @@ async function sendNewOrderEmail(toEmail, { orderId, packageName, totalPrice, pa
   });
 }
 
-// ── Письмо-дубль уведомления из кабинета (только если пользователь включил канал e-mail в настройках) ──
 function escHtml(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
@@ -238,9 +222,9 @@ async function sendNotificationEmail(toEmail, { title, text, buttonText, buttonU
 }
 
 module.exports = {
-  transporter, // используется routes/inbound-email.js для ответов из почты поддержки (с вложениями/заголовками треда)
-  wrapEmail, // фирменный каркас письма (лого, соцсети, футер) — используется и для ответов из почты поддержки
-  baseAttachments, // cid-вложения (лого+иконки соцсетей), нужные, чтобы wrapEmail() отрисовался с картинками
+  transporter,
+  wrapEmail,
+  baseAttachments,
   sendCodeEmail,
   sendNewDeviceLoginEmail,
   sendAccountDeletedEmail,
@@ -252,7 +236,6 @@ module.exports = {
   sendEnterpriseApplicationConfirmationEmail,
 };
 
-// ── Статус-страница: подтверждение подписки ──
 async function sendStatusSubscribedEmail(toEmail, unsubscribeUrl) {
   const html = wrapEmail({
     heading: 'Подписка на статус Antviz',
@@ -273,7 +256,6 @@ async function sendStatusSubscribedEmail(toEmail, unsubscribeUrl) {
   });
 }
 
-// ── Статус-страница: новое обновление по инциденту ──
 const INCIDENT_STATUS_LABELS = {
   investigating: 'Расследуем',
   identified: 'Причина найдена',
@@ -302,10 +284,6 @@ async function sendIncidentUpdateEmail(toEmail, { incidentTitle, status, message
   });
 }
 
-// ── Заявка на крупный проект / свой сервер (enterprise.html) ──
-// Кому слать уведомление о новой заявке — админский email. Если
-// ADMIN_NOTIFY_EMAIL не задан в .env, письмо просто не отправляется
-// (падать при этом не должно — см. .catch() в routes/enterprise.js).
 async function sendEnterpriseApplicationAdminEmail(a) {
   if (!process.env.ADMIN_NOTIFY_EMAIL) {
     console.warn('ADMIN_NOTIFY_EMAIL не задан — письмо о новой enterprise-заявке не отправлено');
@@ -343,7 +321,6 @@ async function sendEnterpriseApplicationAdminEmail(a) {
   });
 }
 
-// Подтверждение самому заявителю, что заявка принята
 async function sendEnterpriseApplicationConfirmationEmail(toEmail, name) {
   const html = wrapEmail({
     heading: 'Заявка получена',

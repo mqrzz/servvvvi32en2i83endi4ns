@@ -17,7 +17,6 @@ function toClient(b) {
   };
 }
 
-// ── GET /api/bans ── список всех банов (только админ), с email/именем юзера
 router.get('/', requireAdmin, async (req, res) => {
   const { rows } = await pool.query(
     `SELECT b.*, u.email, u.display_name
@@ -27,7 +26,6 @@ router.get('/', requireAdmin, async (req, res) => {
   res.json(rows.map(b => ({ ...toClient(b), userEmail: b.email, userName: b.display_name })));
 });
 
-// ── POST /api/bans ── забанить юзера (по email)
 router.post('/', requireAdmin, async (req, res) => {
   try {
     const { email, reason, until, showButton, btnLabel, btnUrl } = req.body;
@@ -45,7 +43,6 @@ router.post('/', requireAdmin, async (req, res) => {
       [userId, reason, until || null, !!showButton, btnLabel || null, btnUrl || null, req.user.email]
     );
 
-    // Забаненный юзер больше не должен иметь активных сессий
     await pool.query('UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL', [userId]);
 
     res.json(toClient(rows[0]));
@@ -55,7 +52,6 @@ router.post('/', requireAdmin, async (req, res) => {
   }
 });
 
-// ── DELETE /api/bans/:userId ── снять бан
 router.delete('/:userId', requireAdmin, async (req, res) => {
   const { rows } = await pool.query('DELETE FROM bans WHERE user_id = $1 RETURNING user_id', [req.params.userId]);
   if (rows.length === 0) return res.status(404).json({ error: 'Бан не найден' });

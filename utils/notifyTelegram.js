@@ -3,20 +3,11 @@ const crypto = require('crypto');
 
 const BOT_NOTIFY_URL = process.env.BOT_NOTIFY_URL || 'https://3ssqztgbot22wsq.vercel.app/api/notify';
 
-// Не блокирует основной запрос и не роняет его, если бот недоступен —
-// уведомление в Telegram это "приятный бонус", а не критичная часть
-// самого действия (ответ в поддержке / создание уведомления должны
-// сохраниться в любом случае, даже если Vercel-бот сейчас недоступен).
-//
-// buttonUrl, если передан, должен вести на страницу, куда нужно ПОПАСТЬ
-// УЖЕ ВОЙДЯ — поэтому оборачиваем его в одноразовый код входа через
-// tg-enter.html (та же таблица bot_tokens, что использует сам бот; тут
-// её не нужно спрашивать через HTTP, бэкенд и так на ней сидит).
 async function notifyTelegram(userId, { title, text, buttonText, buttonUrl } = {}) {
   try {
     const { rows } = await pool.query('SELECT telegram_id FROM users WHERE id = $1', [userId]);
     const chatId = rows[0]?.telegram_id;
-    if (!chatId) return; // юзер не привязал Telegram — это нормально, не ошибка
+    if (!chatId) return;
 
     let finalButtonUrl = null;
     if (buttonText && buttonUrl) {
@@ -43,9 +34,6 @@ async function notifyTelegram(userId, { title, text, buttonText, buttonUrl } = {
       }),
     });
 
-    // Раньше ответ бота вообще не проверялся — 401 (BOT_API_SECRET не совпадает
-    // между бэкендом и Vercel-ботом) или любая другая ошибка терялись молча, и
-    // в логах не оставалось ни следа. Теперь сбой минимум виден в journalctl.
     if (!resp.ok) {
       const body = await resp.text().catch(() => '');
       console.error('notifyTelegram: бот вернул ошибку', resp.status, body, 'для пользователя', userId);

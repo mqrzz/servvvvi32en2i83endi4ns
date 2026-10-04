@@ -1,18 +1,9 @@
-// Единая доставка уведомлений пользователю:
-//   1) запись в кабинет (колокольчик) — всегда, отключить нельзя;
-//   2) Telegram — если привязан бот И в настройках пользователя включён этот тип;
-//   3) e-mail — только если пользователь сам включил этот тип в настройках.
-//
-// Раньше эта логика была размазана: routes/notifications.js (рассылка) и
-// utils/subscriptionReminders.js по-своему вставляли строки и по-своему дёргали
-// Telegram. Теперь оба используют deliverNotifications() отсюда.
 const pool = require('../db/pool');
 const { pruneOldNotifications } = require('./notifications');
 const { notifyTelegram } = require('./notifyTelegram');
 const { sendNotificationEmail } = require('./mailer');
 
 const TYPES = ['order', 'support', 'service', 'system'];
-// По умолчанию — как было до появления настроек: Telegram шлём, письма — нет.
 const DEFAULT_CHANNELS = { telegram: true, email: false };
 
 const DEFAULT_LINKS = {
@@ -34,8 +25,6 @@ function normalizePrefs(raw) {
   return out;
 }
 
-// Если вызывающий не передал type (например, старые кнопки в админке) —
-// определяем по ссылке кнопки, а затем по словам в заголовке.
 function inferType({ type, title, text, buttonUrl, link }) {
   if (TYPES.includes(type)) return type;
   const url = String(link || buttonUrl || '');
@@ -49,7 +38,6 @@ function inferType({ type, title, text, buttonUrl, link }) {
   return 'system';
 }
 
-// Ссылка внутри сайта: https://antviz.ru/profile/orders.html?id=1 -> /profile/orders?id=1
 function toInternalPath(url) {
   if (!url) return null;
   try {
@@ -87,7 +75,6 @@ async function saveUserPrefs(userId, rawPrefs) {
   return prefs;
 }
 
-// userIds — массив id; payload — { title, text, type?, link?, buttonText?, buttonUrl? }
 async function deliverNotifications(userIds, payload) {
   const { title, text, buttonText, buttonUrl } = payload;
   if (!userIds.length) return { sent: 0 };
@@ -100,7 +87,6 @@ async function deliverNotifications(userIds, payload) {
   await pool.query(`INSERT INTO notifications (user_id, title, text, type, link) VALUES ${values}`, params);
   await Promise.all(userIds.map((id) => pruneOldNotifications(id).catch((e) => console.error('pruneOldNotifications:', e))));
 
-  // Дальше — «приятный бонус»: ошибки каналов не должны ронять основное действие.
   let prefsMap = new Map();
   try {
     prefsMap = await loadPrefs(userIds);

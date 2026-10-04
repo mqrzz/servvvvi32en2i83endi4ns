@@ -4,7 +4,6 @@ const { requireAuth } = require('../middleware/requireAuth');
 
 const router = express.Router();
 
-// ── GET /api/sessions ── список всех активных устройств текущего юзера
 router.get('/', requireAuth, async (req, res) => {
   const { rows } = await pool.query(
     `SELECT id, device_name, ip_address, last_active_at, created_at,
@@ -17,7 +16,6 @@ router.get('/', requireAuth, async (req, res) => {
   res.json(rows);
 });
 
-// ── DELETE /api/sessions/:id ── завершить конкретный сеанс (выйти с одного устройства)
 router.delete('/:id', requireAuth, async (req, res) => {
   const { rows } = await pool.query(
     `UPDATE sessions SET revoked_at = now()
@@ -29,7 +27,6 @@ router.delete('/:id', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
-// ── DELETE /api/sessions ── завершить все сеансы, кроме текущего ("выйти со всех устройств")
 router.delete('/', requireAuth, async (req, res) => {
   await pool.query(
     `UPDATE sessions SET revoked_at = now()

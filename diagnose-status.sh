@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Запускать на сервере из папки бэкенда:  cd /var/www/antviz-backend && bash diagnose-status.sh
-# Показывает ПОЧЕМУ монитор считает ЮKassa/бота упавшими — по его же собственной истории проверок.
 set -u
 cd "$(dirname "$0")"
 set -a; [ -f .env ] && . ./.env; set +a

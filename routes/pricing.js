@@ -8,9 +8,6 @@ const {
 
 const router = express.Router();
 
-// Публичный: канонические цены для отображения на фронте (order/index.html,
-// profile/tickets.html) — вместо того чтобы хардкодить те же числа второй
-// раз в HTML, страницы фетчат их отсюда при загрузке.
 router.get('/', (req, res) => {
   res.json({
     tierPrices: TIER_PRICES,
@@ -21,9 +18,6 @@ router.get('/', (req, res) => {
   });
 });
 
-// Авторизованный: точная сумма заказа (тариф + допы + промокод) —
-// используется на форме заказа перед оплатой, чтобы показать пользователю
-// то же число, которое реально уйдёт в ЮKассу.
 router.post('/quote', requireAuth, async (req, res) => {
   const body = req.body || {};
   const pkg = body.package;

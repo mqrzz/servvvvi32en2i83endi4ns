@@ -1,6 +1,5 @@
 const { TOTP, Secret } = require('otpauth');
 
-// Генерирует новый base32-секрет для подключения Authenticator
 function generateSecretBase32() {
   return new Secret({ size: 20 }).base32;
 }
@@ -16,12 +15,10 @@ function buildTotp(secretBase32, email) {
   });
 }
 
-// otpauth:// ссылка — из неё генерируется QR для приложения-аутентификатора
 function otpauthUrl(secretBase32, email) {
   return buildTotp(secretBase32, email).toString();
 }
 
-// window: 1 — допускаем расхождение часов телефона на ±30 секунд
 function verifyToken(secretBase32, token) {
   if (!secretBase32 || !token) return false;
   const totp = buildTotp(secretBase32, '');

@@ -1,24 +1,3 @@
-// ЕДИНЫЙ источник цен на бэкенде. Раньше эти же числа были захардкожены
-// ЕЩЁ в двух местах (order/index.html и mqrz/api/pricing.js) — из-за этого
-// суммарно и завелась история "показывается одна цена, в ЮKассе другая":
-// каждое место считало сумму заказа заново, своей копией формулы, и любое
-// расхождение (забытая правка цены, протухший на полпути промокод) сразу
-// било по факту оплаты. Теперь так:
-//   - здесь — единственное место, где цены прописаны буквально;
-//   - GET /api/pricing отдаёт эти же числа наружу для отображения
-//     (order/index.html, profile/tickets.html — просто фетчат при загрузке,
-//     ничего не хардкодят);
-//   - POST /api/orders/quote отдаёт точную сумму с учётом промокода —
-//     им можно свериться перед оплатой;
-//   - mqrz/api/createPayment.js для типов order/partial/remaining вообще
-//     больше не пересчитывает сумму сам, а берёт уже сохранённые
-//     totalPrice/paidAmount/remainingAmount заказа (посчитанные один раз
-//     здесь же, при создании заказа в routes/orders.js, и обновляемые
-//     здесь же вебхуком в routes/payments.js) — то есть "показанная" и
-//     "списанная" сумма гарантированно одно и то же число из одного места.
-//   - для support/ticket_once (плоские тарифы без промокода) createPayment
-//     тоже спрашивает актуальные цифры у GET /api/pricing, а не хранит их
-//     у себя.
 const TIER_PRICES = {
   'Старт': 2900, 'Рост': 5900, 'Масштаб': 11900,
   'Простой бот': 4900, 'Бот с оплатой': 9900, 'Mini App': 16900,
@@ -32,16 +11,9 @@ const SUPPORT_TARIFFS = {
 const DEFAULT_SUPPORT_TARIFF = 'basic';
 const ONE_OFF_TICKET_PRICE = 350;
 
-// Пересчитываем сумму заново на сервере, а не доверяем тому, что прислал
-// клиент — если промокод к этому моменту истёк/деактивирован/исчерпал лимит,
-// скидка больше не применяется.
-//
-// client — любой объект с методом .query (pool или client активной
-// транзакции); order — объект с полями package, extras (массив),
-// promo_code, user_id (snake_case — как в БД).
 async function recalcOrderTotal(client, order) {
   const base = TIER_PRICES[order.package];
-  if (base == null) return { total: Number(order.total_price) || 0, discount: 0 }; // неизвестный тариф — не пересчитываем
+  if (base == null) return { total: Number(order.total_price) || 0, discount: 0 };
 
   let running = base;
   const extras = Array.isArray(order.extras) ? order.extras : [];

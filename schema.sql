@@ -1,24 +1,17 @@
--- =====================================================
--- ANTVIZ DATABASE SCHEMA (PostgreSQL)
--- Замена Firebase Auth + Firestore
--- =====================================================
 
--- ── РАСШИРЕНИЯ ──
+
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
--- =====================================================
--- 1. ПОЛЬЗОВАТЕЛИ (замена Firebase Auth + users collection)
--- =====================================================
 CREATE TABLE users (
-    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(), -- аналог uid
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     email           TEXT UNIQUE NOT NULL,
-    password_hash   TEXT NOT NULL,                  -- bcrypt-хэш, пароль никогда не хранится открыто
-    email_verified  BOOLEAN NOT NULL DEFAULT FALSE,  -- подтверждён ли email кодом при регистрации
+    password_hash   TEXT NOT NULL,
+    email_verified  BOOLEAN NOT NULL DEFAULT FALSE,
     display_name    TEXT NOT NULL DEFAULT 'Пользователь',
     photo_url       TEXT,
-    role            TEXT NOT NULL DEFAULT 'user', -- 'user' | 'admin'
-    onboarding_done BOOLEAN NOT NULL DEFAULT FALSE, -- из welcome.html
-    telegram_id     BIGINT UNIQUE,                  -- привязка к боту (для tg-enter.html)
+    role            TEXT NOT NULL DEFAULT 'user',
+    onboarding_done BOOLEAN NOT NULL DEFAULT FALSE,
+    telegram_id     BIGINT UNIQUE,
     telegram_username TEXT,
     telegram_linked_at TIMESTAMPTZ,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -28,119 +21,98 @@ CREATE TABLE users (
 CREATE INDEX idx_users_email ON users(email);
 CREATE INDEX idx_users_telegram_id ON users(telegram_id);
 
--- =====================================================
--- 1.1 ОДНОРАЗОВЫЕ ТОКЕНЫ БОТА (привязка аккаунта / вход из мини-аппа)
--- =====================================================
 CREATE TABLE bot_tokens (
     token       TEXT PRIMARY KEY,
     user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    purpose     TEXT NOT NULL, -- 'link' (привязка бота к аккаунту) | 'app_auth' (вход в мини-апп из бота)
+    purpose     TEXT NOT NULL,
     expires_at  TIMESTAMPTZ NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_bot_tokens_expires ON bot_tokens(expires_at);
 
--- =====================================================
--- 1.2 ПРОСТОЕ KEY-VALUE ХРАНИЛИЩЕ ДЛЯ БОТА
--- Vercel-функции бота не имеют своего постоянного хранилища (в отличие от
--- VPS с файлом .maintenance) — техработы бота и состояние "жду текст
--- рассылки от админа" храним здесь.
--- =====================================================
 CREATE TABLE kv_settings (
     key         TEXT PRIMARY KEY,
     value       JSONB NOT NULL,
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- =====================================================
--- 2. КОДЫ ПОДТВЕРЖДЕНИЯ (вход по email+код)
--- =====================================================
 CREATE TABLE auth_codes (
     id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     email       TEXT NOT NULL,
-    code_hash   TEXT NOT NULL,        -- хранить хэш кода, не сам код
-    purpose     TEXT NOT NULL DEFAULT 'login', -- 'login' | 'register' | 'delete_account'
-    attempts    SMALLINT NOT NULL DEFAULT 0,   -- попыток ввода
+    code_hash   TEXT NOT NULL,
+    purpose     TEXT NOT NULL DEFAULT 'login',
+    attempts    SMALLINT NOT NULL DEFAULT 0,
     max_attempts SMALLINT NOT NULL DEFAULT 5,
-    expires_at  TIMESTAMPTZ NOT NULL, -- обычно now() + 10 минут
-    used_at     TIMESTAMPTZ,          -- когда код был использован (чтобы нельзя повторно)
+    expires_at  TIMESTAMPTZ NOT NULL,
+    used_at     TIMESTAMPTZ,
     ip_address  INET,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_auth_codes_email ON auth_codes(email, purpose);
--- для rate-limit: сколько кодов отправлено на email/IP за последний час
+
 CREATE INDEX idx_auth_codes_created ON auth_codes(email, created_at);
 CREATE INDEX idx_auth_codes_ip_created ON auth_codes(ip_address, created_at);
 
--- =====================================================
--- 3. СЕССИИ / УСТРОЙСТВА (profile/sessions.js)
--- =====================================================
 CREATE TABLE sessions (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    token_hash      TEXT NOT NULL UNIQUE, -- хэш refresh/session токена, не сам токен
-    device_name     TEXT,                  -- "Chrome на Windows", распознаём из User-Agent
+    token_hash      TEXT NOT NULL UNIQUE,
+    device_name     TEXT,
     user_agent      TEXT,
     ip_address      INET,
     last_active_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at      TIMESTAMPTZ NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    revoked_at      TIMESTAMPTZ            -- NULL = активна; иначе завершена (разлогин)
+    revoked_at      TIMESTAMPTZ
 );
 
 CREATE INDEX idx_sessions_user ON sessions(user_id);
 CREATE INDEX idx_sessions_token ON sessions(token_hash);
 
--- =====================================================
--- 4. ЗАКАЗЫ (order.html, profile/orders.html, admin/orders.html)
--- =====================================================
 CREATE TABLE orders (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id             UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 
-    -- явный тип заказа: 'site' | 'bot' — не угадывается по тексту/пустым полям
     order_type           TEXT NOT NULL DEFAULT 'site',
-    -- внутренние заметки админа, никогда не уходят клиенту (в отличие от status_comment)
+
     admin_notes           TEXT,
 
-    -- клиентские данные на момент заказа (снапшот, как было в Firestore)
     client_name         TEXT NOT NULL,
     client_email        TEXT NOT NULL,
 
-    -- параметры заказа
-    package             TEXT NOT NULL,        -- t.name — название тарифа
-    site_type           TEXT,                 -- siteKind
-    site_format         TEXT NOT NULL,        -- FORMAT_LABELS[state.format] / "Особый случай: ..."
+    package             TEXT NOT NULL,
+    site_type           TEXT,
+    site_format         TEXT NOT NULL,
     pages               INTEGER,
     total_price         NUMERIC(10,2) NOT NULL,
-    extras              JSONB,                -- extrasArr
+    extras              JSONB,
     domain_option       TEXT,
     domain_name         TEXT,
 
     promo_code          TEXT,
     discount_applied    NUMERIC(10,2) DEFAULT 0,
 
-    description         TEXT,                 -- briefText
+    description         TEXT,
     goals                JSONB,
     content_readiness   TEXT,
     references_text      TEXT,
     launch_date          DATE,
 
-    shop_details         JSONB,                -- {payment, delivery, quantity} для формата shop
+    shop_details         JSONB,
     attachments           JSONB,
     favicon_data           TEXT,
 
-    payment_type          TEXT,                -- YooKassa/Robokassa и т.д.
+    payment_type          TEXT,
     paid_amount            NUMERIC(10,2) NOT NULL DEFAULT 0,
-    remaining_amount        NUMERIC(10,2) NOT NULL DEFAULT 0, -- для частичной оплаты (50%)
-    status                 SMALLINT NOT NULL DEFAULT -1, -- как в исходнике: -1 = ждёт оплаты и т.д.
+    remaining_amount        NUMERIC(10,2) NOT NULL DEFAULT 0,
+    status                 SMALLINT NOT NULL DEFAULT -1,
     revision_requested      BOOLEAN NOT NULL DEFAULT FALSE,
     reviewed                BOOLEAN NOT NULL DEFAULT FALSE,
 
-    site_url                TEXT,             -- ссылка на готовый сайт при сдаче
+    site_url                TEXT,
     site_domain              TEXT,
-    tariff                   TEXT,             -- используется в review-запросах как sel.tariff
+    tariff                   TEXT,
 
     created_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at                TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -150,25 +122,15 @@ CREATE INDEX idx_orders_user ON orders(user_id);
 CREATE INDEX idx_orders_status ON orders(status);
 CREATE INDEX idx_orders_order_type ON orders(order_type);
 
--- =====================================================
--- 4.1 ИСТОРИЯ СМЕНЫ СТАТУСОВ ЗАКАЗА
--- =====================================================
 CREATE TABLE order_status_history (
     id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     order_id    UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
     status      SMALLINT NOT NULL,
-    changed_by  TEXT,              -- email админа; NULL = системное изменение (напр. вебхук оплаты)
+    changed_by  TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_order_status_history_order ON order_status_history(order_id, created_at);
 
--- =====================================================
--- 5. ТИКЕТЫ ПОДДЕРЖКИ (profile/tickets.html, profile/support.html, admin/tickets.html)
--- В Firestore было ДВЕ похожих коллекции: 'tickets' (support chat) и 'service_tickets'
--- (заявки по заказам с рейтингом) — разносим в две таблицы, т.к. модель разная.
--- =====================================================
-
--- 5a. Обращения в поддержку (support-чат, живой диалог)
 CREATE TABLE tickets (
     id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -179,9 +141,9 @@ CREATE TABLE tickets (
     subject      TEXT NOT NULL,
     order_id     UUID REFERENCES orders(id) ON DELETE SET NULL,
     order_label  TEXT,
-    status       TEXT NOT NULL DEFAULT 'open', -- 'open' | 'done'
-    is_read      BOOLEAN NOT NULL DEFAULT TRUE, -- _read (увидел ли КЛИЕНТ)
-    admin_read   BOOLEAN NOT NULL DEFAULT FALSE, -- увидел ли АДМИН последнее сообщение
+    status       TEXT NOT NULL DEFAULT 'open',
+    is_read      BOOLEAN NOT NULL DEFAULT TRUE,
+    admin_read   BOOLEAN NOT NULL DEFAULT FALSE,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -189,11 +151,10 @@ CREATE TABLE tickets (
 CREATE INDEX idx_tickets_user ON tickets(user_id);
 CREATE INDEX idx_tickets_status ON tickets(status);
 
--- сообщения внутри тикета (tickets/{id}/messages в Firestore)
 CREATE TABLE ticket_messages (
     id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     ticket_id   UUID NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
-    sender      TEXT NOT NULL, -- 'user' | 'admin'
+    sender      TEXT NOT NULL,
     text        TEXT,
     image_url   TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -201,7 +162,6 @@ CREATE TABLE ticket_messages (
 
 CREATE INDEX idx_ticket_messages_ticket ON ticket_messages(ticket_id, created_at);
 
--- 5b. Заявки на обслуживание/доработку заказа (с рейтингом)
 CREATE TABLE service_tickets (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     order_id        UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
@@ -214,11 +174,11 @@ CREATE TABLE service_tickets (
     order_site_type TEXT,
     order_tariff    TEXT,
     order_domain    TEXT,
-    billing         TEXT, -- 'subscription' и т.д.
-    subscription_id UUID, -- какой период подписки списал эту заявку в счёт лимита (NULL для billing='once'); FK добавлен ниже ALTER'ом, т.к. service_subscriptions объявлена позже в этом файле
+    billing         TEXT,
+    subscription_id UUID,
     admin_reply     TEXT,
-    status          TEXT NOT NULL DEFAULT 'open', -- 'awaiting_payment' (только для billing='once', до оплаты) | 'open' | 'done'
-    rating          TEXT, -- 'up' | 'down', выставляется юзером после завершения
+    status          TEXT NOT NULL DEFAULT 'open',
+    rating          TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -226,36 +186,24 @@ CREATE TABLE service_tickets (
 CREATE INDEX idx_service_tickets_order ON service_tickets(order_id);
 CREATE INDEX idx_service_tickets_user ON service_tickets(user_id);
 
--- 5c. Подписка на обслуживание сайта (одна активная на заказ).
--- Раньше это было 4 колонки прямо на orders (support_active/support_tariff/
--- support_started_at/support_expires_at) — снепшот без истории продлений,
--- и лимит заявок в месяц вообще не проверялся на бэке: только в JS на
--- фронте (profile/tickets.html), т.е. по факту был обходим прямым вызовом
--- API. tickets_used теперь считает и проверяет сервер (routes/service-
--- tickets.js), а не клиент.
 CREATE TABLE service_subscriptions (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     order_id            UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
     user_id             UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    tariff              TEXT NOT NULL, -- 'basic' | 'priority'
-    status              TEXT NOT NULL DEFAULT 'active', -- 'active' | 'expired' | 'canceled'
+    tariff              TEXT NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'active',
     period_start        TIMESTAMPTZ NOT NULL,
     period_end          TIMESTAMPTZ NOT NULL,
-    tickets_used        INT NOT NULL DEFAULT 0, -- сбрасывается на 0 при каждом продлении (новый период)
+    tickets_used        INT NOT NULL DEFAULT 0,
     auto_renew          BOOLEAN NOT NULL DEFAULT FALSE,
-    expiry_notified_at  TIMESTAMPTZ, -- чтобы не слать напоминание об истечении повторно
+    expiry_notified_at  TIMESTAMPTZ,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Один заказ — одна (текущая) подписка на обслуживание. История продлений
--- живёт в subscription_renewals ниже, а не в отдельных строках здесь.
 CREATE UNIQUE INDEX idx_service_subscriptions_order ON service_subscriptions(order_id);
 CREATE INDEX idx_service_subscriptions_user ON service_subscriptions(user_id);
 
--- 5d. История продлений — раньше нигде не хранилась: сколько раз продлевали,
--- по какому тарифу и когда, было видно только по последнему снепшоту в
--- orders (одно число, без истории).
 CREATE TABLE subscription_renewals (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     subscription_id UUID NOT NULL REFERENCES service_subscriptions(id) ON DELETE CASCADE,
@@ -273,10 +221,6 @@ ALTER TABLE service_tickets
   FOREIGN KEY (subscription_id) REFERENCES service_subscriptions(id) ON DELETE SET NULL;
 CREATE INDEX idx_service_tickets_subscription ON service_tickets(subscription_id);
 
--- =====================================================
--- 6. УВЕДОМЛЕНИЯ (profile/notifications.html)
--- Firestore: notifications/{uid}/items/{id} → плоская таблица с user_id
--- =====================================================
 CREATE TABLE notifications (
     id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -288,41 +232,32 @@ CREATE TABLE notifications (
 
 CREATE INDEX idx_notifications_user ON notifications(user_id, is_read);
 
--- =====================================================
--- 7. БАНЫ (admin/bans.html)
--- =====================================================
 CREATE TABLE bans (
     user_id     UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     reason      TEXT,
-    until       TIMESTAMPTZ,          -- NULL = навсегда
+    until       TIMESTAMPTZ,
     show_button BOOLEAN NOT NULL DEFAULT FALSE,
     btn_label   TEXT,
     btn_url     TEXT,
-    banned_by   TEXT NOT NULL,        -- email админа
+    banned_by   TEXT NOT NULL,
     banned_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- =====================================================
--- 8. ПРОМОКОДЫ (admin/promos.html)
--- =====================================================
 CREATE TABLE promo_codes (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     code            TEXT UNIQUE NOT NULL,
-    discount_type   TEXT NOT NULL,     -- 'percent' | 'fixed'
+    discount_type   TEXT NOT NULL,
     discount_value  NUMERIC(10,2) NOT NULL,
     active          BOOLEAN NOT NULL DEFAULT TRUE,
     used_count      INTEGER NOT NULL DEFAULT 0,
-    usage_limit     INTEGER,           -- NULL = без лимита; иначе промокод перестаёт применяться при used_count >= usage_limit
+    usage_limit     INTEGER,
     expires_at      TIMESTAMPTZ,
-    for_user_id     UUID REFERENCES users(id) ON DELETE CASCADE, -- персональный промокод
+    for_user_id     UUID REFERENCES users(id) ON DELETE CASCADE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_promo_codes_code ON promo_codes(code);
 
--- =====================================================
--- 9. ОТЗЫВЫ (admin/reviews.html, profile/orders.html)
--- =====================================================
 CREATE TABLE reviews (
     id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -331,19 +266,12 @@ CREATE TABLE reviews (
     text        TEXT,
     client_name TEXT,
     client_email TEXT,
-    hidden      BOOLEAN NOT NULL DEFAULT FALSE, -- модерация: скрыт с публичной страницы отзывов
+    hidden      BOOLEAN NOT NULL DEFAULT FALSE,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Один отзыв на заказ: без этого два параллельных запроса (двойной клик,
--- повторная отправка формы) могли проскочить проверку order.reviewed в
--- приложении и создать два отзыва на один и тот же заказ. Уникальный индекс
--- также ускоряет обычный поиск по order_id, отдельный обычный индекс не нужен.
 CREATE UNIQUE INDEX idx_reviews_order_unique ON reviews(order_id);
 
--- =====================================================
--- Автообновление updated_at
--- =====================================================
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -363,36 +291,28 @@ CREATE TRIGGER trg_service_tickets_updated BEFORE UPDATE ON service_tickets
 CREATE TRIGGER trg_service_subscriptions_updated BEFORE UPDATE ON service_subscriptions
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
-
--- =====================================================
--- N. ПОЧТА ПОДДЕРЖКИ (support@antviz.ru в админке)
--- =====================================================
--- Шаблоны писем (используются и при ответе, и при написании нового письма)
 CREATE TABLE IF NOT EXISTS email_templates (
     id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     title       TEXT NOT NULL,
     subject     TEXT NOT NULL DEFAULT '',
-    body        TEXT NOT NULL DEFAULT '', -- поддерживает {{name}} и {{email}} — подставляются на фронте перед отправкой
+    body        TEXT NOT NULL DEFAULT '',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Сама переписка: входящие (с воркера Cloudflare) и исходящие (ответы/новые письма из админки)
--- thread_key = lower(email контрагента) — вся переписка с одним адресом собирается в один тред,
--- независимо от темы письма (так проще для саппорта, чем группировка по Subject/References).
 CREATE TABLE IF NOT EXISTS support_emails (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     direction       TEXT NOT NULL CHECK (direction IN ('in','out')),
     thread_key      TEXT NOT NULL,
-    message_id      TEXT,           -- Message-ID письма (входящего — из заголовка, исходящего — что вернул nodemailer)
-    in_reply_to     TEXT,           -- Message-ID письма, на которое отвечаем (для склейки в тред у получателя)
+    message_id      TEXT,
+    in_reply_to     TEXT,
     from_email      TEXT NOT NULL,
     from_name       TEXT,
     to_email        TEXT NOT NULL,
     subject         TEXT NOT NULL DEFAULT '(без темы)',
     body_html       TEXT,
     body_text       TEXT,
-    attachments     JSONB,          -- [{name, type, size, data}] — data это base64 data URL
+    attachments     JSONB,
     admin_id        UUID REFERENCES users(id) ON DELETE SET NULL,
     template_id     UUID REFERENCES email_templates(id) ON DELETE SET NULL,
     is_read         BOOLEAN NOT NULL DEFAULT FALSE,
@@ -401,3 +321,16 @@ CREATE TABLE IF NOT EXISTS support_emails (
 
 CREATE INDEX IF NOT EXISTS idx_support_emails_thread ON support_emails(thread_key);
 CREATE INDEX IF NOT EXISTS idx_support_emails_created ON support_emails(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS consent_log (
+    id          BIGSERIAL PRIMARY KEY,
+    user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL,
+    doc_version TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    ip_address  TEXT,
+    user_agent  TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_consent_log_user ON consent_log(user_id, created_at DESC);

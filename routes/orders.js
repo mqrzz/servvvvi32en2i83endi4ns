@@ -3,10 +3,10 @@ const pool = require('../db/pool');
 const { requireAuth, requireAdmin, requireUserOrService } = require('../middleware/requireAuth');
 const { sendNewOrderEmail } = require('../utils/mailer');
 const { recalcOrderTotal } = require('../utils/pricing');
+const { logConsent } = require('../utils/consent');
 
 const router = express.Router();
 
-// Приводим snake_case из БД к camelCase, как ожидает фронт (site*, clientName и т.д.)
 function toClientOrder(o) {
   return {
     id: o.id,
@@ -70,15 +70,10 @@ function toClientOrder(o) {
   };
 }
 
-// Расширенная версия для админки — добавляет внутренние заметки, которые
-// НЕ должны попадать клиенту (в отличие от statusComment). Используется
-// только в admin-роутах, никогда в клиентских (GET /, GET /:id для владельца).
 function toAdminOrder(o) {
   return { ...toClientOrder(o), adminNotes: o.admin_notes || '' };
 }
 
-// Пишем запись в историю статусов заказа. changedBy = email админа,
-// либо null для системных изменений (напр. вебхук оплаты меняет статус 6→5).
 async function logStatusChange(orderId, status, changedBy) {
   try {
     await pool.query(
@@ -90,7 +85,6 @@ async function logStatusChange(orderId, status, changedBy) {
   }
 }
 
-// ── GET /api/orders ── список заказов текущего юзера
 router.get('/', requireAuth, async (req, res) => {
   const { rows } = await pool.query(
     `SELECT * FROM orders WHERE user_id = $1 AND status != -1 ORDER BY created_at DESC`,
@@ -99,15 +93,11 @@ router.get('/', requireAuth, async (req, res) => {
   res.json(rows.map(toClientOrder));
 });
 
-// ── GET /api/orders/admin/all ── все заказы (только админ)
-// ВАЖНО: этот маршрут должен идти раньше /:id, иначе Express примет
-// "admin" за значение параметра :id.
 router.get('/admin/all', requireAdmin, async (req, res) => {
   const { rows } = await pool.query('SELECT * FROM orders ORDER BY created_at DESC');
   res.json(rows.map(toAdminOrder));
 });
 
-// ── GET /api/orders/:id ── один заказ (владелец или админ)
 router.get('/:id', requireUserOrService, async (req, res) => {
   const { rows } = await pool.query('SELECT * FROM orders WHERE id = $1', [req.params.id]);
   if (rows.length === 0) return res.status(404).json({ error: 'Заказ не найден' });
@@ -118,8 +108,6 @@ router.get('/:id', requireUserOrService, async (req, res) => {
   res.json(isAdmin ? toAdminOrder(order) : toClientOrder(order));
 });
 
-// ── GET /api/orders/:id/history ── история смены статусов (владелец или админ)
-// Владельцу — только статус+дата (для таймлайна в кабинете), админу — ещё и кто менял.
 router.get('/:id/history', requireUserOrService, async (req, res) => {
   const { rows: oRows } = await pool.query('SELECT user_id FROM orders WHERE id = $1', [req.params.id]);
   if (oRows.length === 0) return res.status(404).json({ error: 'Заказ не найден' });
@@ -138,26 +126,14 @@ router.get('/:id/history', requireUserOrService, async (req, res) => {
   })));
 });
 
-// ── POST /api/orders ── создать заказ (черновик, status=-1 до оплаты)
 router.post('/', requireAuth, async (req, res) => {
   try {
     const b = req.body;
-    // Тип заказа — явно от фронта ('bot' для трека Telegram-бот/мини-апп),
-    // а не угадывается потом в админке по пустым/заполненным полям.
+    if (b.agreeOferta !== true || b.consentPd !== true) {
+      return res.status(400).json({ error: 'Нужно принять оферту и дать согласие на обработку персональных данных' });
+    }
     const orderType = b.orderType === 'bot' ? 'bot' : 'site';
 
-    // Раньше totalPrice/paidAmount/remainingAmount брались из тела запроса
-    // как есть — то, что посчитал браузер клиента, ничем не проверялось.
-    // При обычном использовании сайта это совпадает с реальной ценой (клиент
-    // считает по тем же тарифам), но: (а) прямой запрос к API мог прислать
-    // любое число, которое потом навсегда оседало в карточке заказа и в
-    // статистике; (б) если что-то успело разъехаться между моментом, когда
-    // клиент в браузере посчитал цену, и моментом отправки формы (истёк
-    // только что применённый промокод и т.п.) — сохранялась именно
-    // клиентская, уже неверная цифра. Теперь считаем totalPrice на сервере
-    // по тем же тарифам/промокоду, что и при оплате (utils/pricing.js) —
-    // так totalPrice/remainingAmount с самого начала совпадают с тем, что
-    // реально спишется при оплате.
     const { total: totalPrice } = await recalcOrderTotal(pool, {
       package: b.package,
       extras: b.extras,
@@ -183,10 +159,11 @@ router.post('/', requireAuth, async (req, res) => {
         b.description || null, JSON.stringify(b.goals || null), b.contentReadiness || null,
         b.referencesText || null, b.launchDate || null,
         JSON.stringify(b.shopDetails || null), JSON.stringify(b.attachments || null), b.favicon || null,
-        b.paymentType || null, 0, remainingAmount, -1, // -1 = черновик до оплаты; paid_amount всегда 0 на создании — платить ещё не платили
+        b.paymentType || null, 0, remainingAmount, -1,
       ]
     );
     const order = rows[0];
+    await logConsent(req.user.id, ['oferta', 'pd'], req, 'order_form');
     res.json(toClientOrder(order));
   } catch (err) {
     console.error('create order error:', err);
@@ -194,8 +171,6 @@ router.post('/', requireAuth, async (req, res) => {
   }
 });
 
-// ── POST /api/orders/cleanup-drafts ── удалить свои зависшие черновики
-// (status=-1, старше 10 минут) — чтобы неоплаченные попытки не копились
 router.post('/cleanup-drafts', requireAuth, async (req, res) => {
   await pool.query(
     `DELETE FROM orders WHERE user_id = $1 AND status = -1 AND created_at < now() - interval '10 minutes'`,
@@ -204,7 +179,6 @@ router.post('/cleanup-drafts', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
-// ── DELETE /api/orders/:id ── удалить свой черновик (только status=-1, например если оплата не запустилась)
 router.delete('/:id', requireAuth, async (req, res) => {
   const { rows } = await pool.query(
     `DELETE FROM orders WHERE id = $1 AND user_id = $2 AND status = -1 RETURNING id`,
@@ -214,19 +188,12 @@ router.delete('/:id', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
-// ── DELETE /api/orders/admin/:id ── полное удаление заказа в любом статусе (только админ) ──
-// В отличие от DELETE /:id (только свой черновик), это безусловное удаление —
-// используется из панели управления сервером/данными в админке.
 router.delete('/admin/:id', requireAdmin, async (req, res) => {
   const { rows } = await pool.query(`DELETE FROM orders WHERE id = $1 RETURNING id`, [req.params.id]);
   if (rows.length === 0) return res.status(404).json({ error: 'Заказ не найден' });
   res.json({ ok: true });
 });
 
-// ── PATCH /api/orders/:id ── гибкое обновление любых полей (только админ) —
-// используется админкой для статус-комментариев, дат, доставки сайта,
-// возвратов, обслуживания и т.д. Белый список полей защищает от
-// произвольной записи в колонки, которых нет в этом списке.
 const ADMIN_PATCHABLE_FIELDS = {
   orderType: 'order_type', adminNotes: 'admin_notes',
   siteUrl: 'site_url', siteDomain: 'site_domain', siteFaviconUrl: 'site_favicon_url',
@@ -274,7 +241,6 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   }
 });
 
-// ── PATCH /api/orders/:id/status ── смена статуса (только админ)
 router.patch('/:id/status', requireAdmin, async (req, res) => {
   const { status } = req.body;
   if (typeof status !== 'number') return res.status(400).json({ error: 'Некорректный статус' });
@@ -284,7 +250,6 @@ router.patch('/:id/status', requireAdmin, async (req, res) => {
   const order = rows[0];
   logStatusChange(order.id, status, req.user.email);
 
-  // Уведомление на почту при переходе в оплаченный статус (0 = принят в работу)
   if (status === 0) {
     sendNewOrderEmail(order.client_email, {
       orderId: order.id,
@@ -296,7 +261,6 @@ router.patch('/:id/status', requireAdmin, async (req, res) => {
   res.json(toAdminOrder(order));
 });
 
-// ── GET /api/orders/:id/payments ── история платежей по заказу (владелец или админ)
 router.get('/:id/payments', requireUserOrService, async (req, res) => {
   const { rows: oRows } = await pool.query('SELECT user_id FROM orders WHERE id = $1', [req.params.id]);
   if (oRows.length === 0) return res.status(404).json({ error: 'Заказ не найден' });
@@ -313,10 +277,6 @@ router.get('/:id/payments', requireUserOrService, async (req, res) => {
   })));
 });
 
-// ── POST /api/orders/:id/revision ── клиент просит правки, пока заказ на проверке (status=3)
-// Раньше кнопка "Запросить правки" в кабинете была заглушкой (Firebase-era TODO) —
-// эндпоинта не существовало вообще. comment необязателен, если передан — уходит
-// комментарием в статус-историю заказа, чтобы админ видел, что именно просили поправить.
 router.post('/:id/revision', requireAuth, async (req, res) => {
   try {
     const { comment } = req.body || {};
@@ -334,9 +294,6 @@ router.post('/:id/revision', requireAuth, async (req, res) => {
     );
     logStatusChange(req.params.id, 4, null);
     if (comment) {
-      // Свободный текст от клиента храним как первое сообщение в новом тикете
-      // поддержки, привязанном к заказу — так у этого текста уже есть готовое,
-      // рабочее место для просмотра и переписки (не изобретаем отдельное поле).
       const tClient = await pool.connect();
       try {
         await tClient.query('BEGIN');
@@ -364,8 +321,6 @@ router.post('/:id/revision', requireAuth, async (req, res) => {
   }
 });
 
-// ── POST /api/orders/:id/refund ── клиент запрашивает возврат, пока заказ ещё не в работе (status<2)
-// Раньше кнопка "Запросить возврат" в кабинете тоже была заглушкой — эндпоинта не было.
 router.post('/:id/refund', requireAuth, async (req, res) => {
   try {
     const { reason, comment } = req.body || {};

@@ -16,7 +16,6 @@ function isDisposableEmail(email) {
   return domain ? disposableSet.has(domain) : false;
 }
 
-// 999
 async function verifyTurnstile(token) {
   if (!token) return false;
   try {
@@ -33,7 +32,7 @@ async function verifyTurnstile(token) {
     return !!data.success;
   } catch (err) {
     console.error('verifyTurnstile: прокси недоступен:', err);
-    return false; // строгий режим — недоступна проверка -> считаем, что не пройдена
+    return false;
   }
 }
 
@@ -42,7 +41,6 @@ const UPTIME_DAYS = 90;
 const SEVERITIES = ['degraded', 'partial', 'major', 'maint'];
 const INCIDENT_STATUSES = ['investigating', 'identified', 'monitoring', 'resolved'];
 
-// Не больше 3 попыток подписки за 10 минут с одного IP — защита от спама формой
 const subscribeLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
   max: 3,
@@ -55,11 +53,8 @@ function isValidEmail(email) {
   return typeof email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
 }
 
-// ── Считает % аптайма и 90 дневных статусов из status_checks для одного сервиса ──
-// Дни считаем по московскому времени (сайт российский), а не по UTC — иначе
-// граница "сегодня/вчера" уезжает на 3 часа и путает даже настоящие данные.
 const TIMEZONE = 'Europe/Moscow';
-const dayKeyFmt = new Intl.DateTimeFormat('en-CA', { timeZone: TIMEZONE }); // -> YYYY-MM-DD
+const dayKeyFmt = new Intl.DateTimeFormat('en-CA', { timeZone: TIMEZONE });
 
 async function buildUptime(serviceId) {
   const { rows } = await pool.query(
@@ -73,16 +68,9 @@ async function buildUptime(serviceId) {
     [serviceId]
   );
 
-  // day -> {okCount, total}. Если за день упали НЕ ВСЕ проверки — статус 'degraded'
-  // (жёлтый), а не 'major' (красный) — красный только если упало вообще всё.
   const byDay = new Map(rows.map((r) => [dayKeyFmt.format(r.day), { ok: Number(r.ok_count), total: Number(r.total) }]));
 
-  // Типичное число проверок за день (раз в 5 минут) — используется как "вес"
-  // дня без данных, чтобы он засчитывался как полностью нормальный, а не просто
-  // выпадал из расчёта. Так пара реально плохих дней не портит картину, если
-  // остальные 88 дней сервис ещё не мониторился (или мониторился, но данные
-  // почистили) — они считаются "в порядке", а не игнорируются нейтрально.
-  const ASSUMED_CHECKS_PER_DAY = Math.round((24 * 60) / 5); // 288, интервал мониторинга — 5 минут
+  const ASSUMED_CHECKS_PER_DAY = Math.round((24 * 60) / 5);
 
   const days = [];
   let okSum = 0;
@@ -91,7 +79,7 @@ async function buildUptime(serviceId) {
   for (let i = UPTIME_DAYS - 1; i >= 0; i--) {
     const key = dayKeyFmt.format(new Date(Date.now() - i * 86400000));
     const d = byDay.get(key);
-    let status = null; // нет данных за этот день
+    let status = null;
     if (d && d.total > 0) {
       okSum += d.ok;
       totalSum += d.total;
@@ -100,7 +88,6 @@ async function buildUptime(serviceId) {
       else if (d.ok === 0) status = 'major';
       else status = 'degraded';
     } else {
-      // День без данных — засчитываем как полностью нормальный
       okSum += ASSUMED_CHECKS_PER_DAY;
       totalSum += ASSUMED_CHECKS_PER_DAY;
     }
@@ -126,7 +113,6 @@ function serviceToClient(s, uptime, latestLatencyMs) {
   };
 }
 
-// Время ответа последней успешной проверки — просто для информации рядом со статусом
 async function latestLatency(serviceId) {
   const { rows } = await pool.query(
     `SELECT latency_ms FROM status_checks WHERE service_id = $1 AND ok = TRUE
@@ -161,7 +147,6 @@ async function incidentsWithUpdates(limit = 30) {
     createdAt: i.created_at,
     resolvedAt: i.resolved_at,
     scheduledAt: i.scheduled_at,
-    // группа для фронта: активное сейчас / запланировано на будущее / история (закрыто)
     group: i.status === 'resolved'
       ? 'history'
       : (i.scheduled_at && new Date(i.scheduled_at) > new Date() ? 'scheduled' : 'active'),
@@ -171,7 +156,6 @@ async function incidentsWithUpdates(limit = 30) {
   }));
 }
 
-// ── GET /api/status ── публичное, отдаёт всё для рендера страницы ──
 router.get('/', async (req, res) => {
   try {
     const { rows: services } = await pool.query('SELECT * FROM status_services ORDER BY sort_order');
@@ -187,9 +171,6 @@ router.get('/', async (req, res) => {
       return (rank[s.status] || 0) > (rank[acc] || 0) ? s.status : acc;
     }, 'ok');
 
-    // Отдаём имена затронутых сервисов отдельно — на фронте формулировка баннера
-    // должна отличаться для "не работает один сервис" и "проблемы массово",
-    // а не всегда писать "серьёзные перебои" из-за одного упавшего.
     const affectedServiceNames = withUptime.filter((s) => s.status !== 'ok').map((s) => s.name);
 
     res.json({
@@ -205,11 +186,6 @@ router.get('/', async (req, res) => {
   }
 });
 
-// ── GET /api/status/feed.xml ── публичное, RSS-фид инцидентов ──
-// Та же самая история инцидентов, что и на странице, просто в формате, который
-// понимают читалки фидов (Feedly и т.п.) — альтернатива email-подписке. Данные
-// уже загружены на каждый обычный визит страницы, здесь просто другая обёртка —
-// заметной нагрузки не добавляет.
 function xmlEscape(s) {
   return String(s ?? '').replace(/[<>&'"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' }[c]));
 }
@@ -253,7 +229,6 @@ router.get('/feed.xml', async (req, res) => {
   }
 });
 
-// ── POST /api/status/subscribe ── публичное, подписка на уведомления ──
 router.post('/subscribe', subscribeLimiter, async (req, res) => {
   try {
     const email = String(req.body?.email || '').trim().toLowerCase();
@@ -265,8 +240,6 @@ router.post('/subscribe', subscribeLimiter, async (req, res) => {
     const captchaOk = await verifyTurnstile(req.body?.cfToken);
     if (!captchaOk) return res.status(400).json({ error: 'Не пройдена проверка капчи, попробуйте ещё раз' });
 
-    // Уже подписан — не шлём письмо повторно и не трогаем токен отписки,
-    // просто говорим об этом честно, отдельным сообщением.
     const existing = await pool.query('SELECT id FROM status_subscribers WHERE email = $1', [email]);
     if (existing.rows.length > 0) {
       return res.json({ ok: true, alreadySubscribed: true });
@@ -290,7 +263,6 @@ router.post('/subscribe', subscribeLimiter, async (req, res) => {
   }
 });
 
-// ── GET /api/status/unsubscribe/:token ── публичное, ссылка из письма ──
 router.get('/unsubscribe/:token', async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -305,18 +277,12 @@ router.get('/unsubscribe/:token', async (req, res) => {
   }
 });
 
-// ════════════════════════════════════════════════════════════
-// Ниже — только для админов (requireAdmin), чтобы можно было
-// править статус-страницу без прямого доступа к БД.
-// ════════════════════════════════════════════════════════════
 
-// ── GET /api/status/services ── полный список для админки (с check_url/check_type) ──
 router.get('/services', requireAdmin, async (req, res) => {
   const { rows } = await pool.query('SELECT * FROM status_services ORDER BY sort_order');
   res.json(rows);
 });
 
-// ── POST /api/status/services ── создать сервис ──
 router.post('/services', requireAdmin, async (req, res) => {
   try {
     const { name, slug, checkUrl, checkType, sortOrder } = req.body || {};
@@ -334,7 +300,6 @@ router.post('/services', requireAdmin, async (req, res) => {
   }
 });
 
-// ── PATCH /api/status/services/:id ── изменить сервис / выставить статус вручную ──
 router.patch('/services/:id', requireAdmin, async (req, res) => {
   try {
     const { name, checkUrl, checkType, checkHeaders, sortOrder, status, manualOverride } = req.body || {};
@@ -358,9 +323,6 @@ router.patch('/services/:id', requireAdmin, async (req, res) => {
 
     if (fields.length === 0) return res.status(400).json({ error: 'Нечего обновлять' });
 
-    // Меняется URL или тип проверки — старая история проверок относится к другому
-    // способу проверки и больше не отражает реальность нового. Чтобы % аптайма не
-    // мешал старые (возможно ошибочные) данные с новыми — чистим историю при смене.
     const changingCheckMethod = checkUrl !== undefined || checkType !== undefined;
     if (changingCheckMethod) {
       await pool.query('DELETE FROM status_checks WHERE service_id = $1', [req.params.id]);
@@ -373,10 +335,6 @@ router.patch('/services/:id', requireAdmin, async (req, res) => {
     );
     if (rows.length === 0) return res.status(404).json({ error: 'Сервис не найден' });
 
-    // Сняли ручную фиксацию ИЛИ поменяли способ проверки (URL/тип/заголовки) — в обоих
-    // случаях сразу гоняем реальную проверку вместо того чтобы ждать до 5 минут
-    // (следующий плановый цикл монитора). Раньше выглядело так, будто данные не
-    // совпадают с реальностью — статус уже "ok", а % аптайма ещё старый.
     const needsInstantRecheck = manualOverride === false || checkUrl !== undefined || checkType !== undefined || checkHeaders !== undefined;
     if (needsInstantRecheck) {
       await statusMonitor.checkService(req.params.id).catch((err) =>
@@ -393,17 +351,11 @@ router.patch('/services/:id', requireAdmin, async (req, res) => {
   }
 });
 
-// ── DELETE /api/status/services/:id ──
 router.delete('/services/:id', requireAdmin, async (req, res) => {
   await pool.query('DELETE FROM status_services WHERE id = $1', [req.params.id]);
   res.json({ ok: true });
 });
 
-// ── DELETE /api/status/services/:id/checks?date=YYYY-MM-DD ── очистить историю
-// проверок сервиса за один конкретный день (по московскому времени) — например,
-// если день покрашен жёлтым/красным из-за ошибки в настройках мониторинга, а не
-// реального сбоя. После очистки день становится "нет данных" и на графике снова
-// зелёный (дни без данных не считаются проблемой).
 router.delete('/services/:id/checks', requireAdmin, async (req, res) => {
   const date = req.query.date;
   if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
@@ -417,8 +369,6 @@ router.delete('/services/:id/checks', requireAdmin, async (req, res) => {
   res.json({ ok: true, deleted: rowCount });
 });
 
-// Рассылка подписчикам — общая функция, см. lib/statusNotify.js
-// ── POST /api/status/incidents ── создать инцидент (+ первая запись таймлайна) ──
 router.post('/incidents', requireAdmin, async (req, res) => {
   try {
     const { title, severity, serviceId, message, scheduledAt } = req.body || {};
@@ -445,9 +395,6 @@ router.post('/incidents', requireAdmin, async (req, res) => {
       [incident.id, message, req.user.email]
     );
 
-    // Пока инцидент открыт — статус сервиса подсвечивается его severity (если не override).
-    // Если это запланированные работы на будущее — статус сервиса пока НЕ трогаем,
-    // он появится в разделе "Запланировано", а не как активная проблема прямо сейчас.
     if (serviceId && !isFuturePlan) {
       await pool.query(
         `UPDATE status_services SET status = $1 WHERE id = $2 AND manual_override = FALSE`,
@@ -466,7 +413,6 @@ router.post('/incidents', requireAdmin, async (req, res) => {
   }
 });
 
-// ── POST /api/status/incidents/:id/updates ── добавить запись в таймлайн (и разослать) ──
 router.post('/incidents/:id/updates', requireAdmin, async (req, res) => {
   try {
     const { status, message } = req.body || {};
@@ -486,9 +432,6 @@ router.post('/incidents/:id/updates', requireAdmin, async (req, res) => {
       [status, status === 'resolved' ? new Date() : null, incident.id]
     );
 
-    // Инцидент устранён — пересчитываем статус сервиса по ОСТАВШИМСЯ открытым
-    // инцидентам (если есть другой открытый инцидент на этот же сервис — статус
-    // должен остаться на его severity, а не сброситься в 'ok' вслепую)
     if (status === 'resolved' && incident.service_id) {
       const { rows: stillOpen } = await pool.query(
         `SELECT severity FROM status_incidents WHERE service_id = $1 AND status != 'resolved' AND id != $2`,
@@ -514,9 +457,6 @@ router.post('/incidents/:id/updates', requireAdmin, async (req, res) => {
   }
 });
 
-// ── PATCH /api/status/incidents/:id ── тихо поправить текст задним числом (например
-// «на самом деле это был ложный автоматический сбой») — БЕЗ рассылки подписчикам,
-// это правка уже случившейся истории, а не новое событие для timeline.
 router.patch('/incidents/:id', requireAdmin, async (req, res) => {
   try {
     const { title, severity, message } = req.body || {};
@@ -535,7 +475,6 @@ router.patch('/incidents/:id', requireAdmin, async (req, res) => {
     }
 
     if (message !== undefined) {
-      // правим самую первую запись таймлайна — то, с чего инцидент начался
       await pool.query(
         `UPDATE status_incident_updates SET message = $1
          WHERE id = (SELECT id FROM status_incident_updates WHERE incident_id = $2 ORDER BY created_at ASC LIMIT 1)`,
@@ -550,19 +489,11 @@ router.patch('/incidents/:id', requireAdmin, async (req, res) => {
   }
 });
 
-// ── DELETE /api/status/incidents/:id ── удалить инцидент целиком (например, создан по ошибке) ──
 router.delete('/incidents/:id', requireAdmin, async (req, res) => {
   await pool.query('DELETE FROM status_incidents WHERE id = $1', [req.params.id]);
   res.json({ ok: true });
 });
 
-// ════════════════════════════════════════════════════════════
-// Диагностика сети сервера — админ-инструмент, не публичная часть
-// статус-страницы. Показывает: публичный IP сервера (+ провайдер, город),
-// пинг до нескольких надёжных точек (чтобы отличить "у меня проблема с
-// конкретным сервисом" от "у сервера вообще проблемы с интернетом"),
-// и тест скорости по запросу.
-// ════════════════════════════════════════════════════════════
 
 const DIAG_TARGETS = [
   { name: 'Cloudflare', url: 'https://www.cloudflare.com/cdn-cgi/trace' },
@@ -585,7 +516,6 @@ async function pingOne(url) {
   }
 }
 
-// ── GET /api/status/diagnostics ── IP сервера + пинг до контрольных точек ──
 router.get('/diagnostics', requireAdmin, async (req, res) => {
   try {
     let ipInfo = null;
@@ -609,10 +539,9 @@ router.get('/diagnostics', requireAdmin, async (req, res) => {
   }
 });
 
-// ── GET /api/status/diagnostics/speedtest ── тест скорости, по запросу (медленный) ──
 router.get('/diagnostics/speedtest', requireAdmin, async (req, res) => {
   try {
-    const bytes = 15 * 1000 * 1000; // 15 МБ — компромисс между точностью и временем ожидания
+    const bytes = 15 * 1000 * 1000;
     const started = Date.now();
     const resp = await fetch(`https://speed.cloudflare.com/__down?bytes=${bytes}`);
     const buf = await resp.arrayBuffer();

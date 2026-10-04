@@ -18,9 +18,6 @@ function toClient(n) {
   };
 }
 
-// ── GET /api/notifications ── список своих уведомлений (храним только
-// последние 10 на пользователя — старые реально удаляются, см.
-// utils/notifications.js)
 router.get('/', requireAuth, async (req, res) => {
   const { rows } = await pool.query(
     `SELECT * FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2`,
@@ -29,7 +26,6 @@ router.get('/', requireAuth, async (req, res) => {
   res.json(rows.map(toClient));
 });
 
-// ── GET /api/notifications/prefs ── настройки каналов (Telegram / e-mail) по типам
 router.get('/prefs', requireAuth, async (req, res) => {
   try {
     const prefs = await getUserPrefs(req.user.id);
@@ -45,7 +41,6 @@ router.get('/prefs', requireAuth, async (req, res) => {
   }
 });
 
-// ── PUT /api/notifications/prefs ── сохранить настройки; тело: { prefs: { order:{telegram,email}, ... } }
 router.put('/prefs', requireAuth, async (req, res) => {
   try {
     const raw = req.body && req.body.prefs;
@@ -58,14 +53,11 @@ router.put('/prefs', requireAuth, async (req, res) => {
   }
 });
 
-// ── PATCH /api/notifications/read-all ── отметить все как прочитанные
-// (объявлен ДО /:id/read — иначе "read-all" ушёл бы туда как :id)
 router.patch('/read-all', requireAuth, async (req, res) => {
   await pool.query('UPDATE notifications SET is_read = TRUE WHERE user_id = $1 AND is_read = FALSE', [req.user.id]);
   res.json({ ok: true });
 });
 
-// ── PATCH /api/notifications/:id/read ── отметить одно как прочитанное
 router.patch('/:id/read', requireAuth, async (req, res) => {
   const { rows } = await pool.query(
     'UPDATE notifications SET is_read = TRUE WHERE id = $1 AND user_id = $2 RETURNING id',
@@ -75,12 +67,6 @@ router.patch('/:id/read', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
-// ── POST /api/notifications/broadcast ── рассылка (только админ)
-// target: 'all' | конкретный user_id
-// Необязательные поля: type ('order'|'support'|'service'|'system'), link (путь внутри
-// сайта, куда ведёт клик по уведомлению). Если type не передан — определяется
-// автоматически (см. utils/notify.js). Доставка в Telegram и e-mail учитывает
-// настройки конкретного пользователя.
 router.post('/broadcast', requireAdmin, async (req, res) => {
   try {
     const { target, title, text, buttonText, buttonUrl, type, link } = req.body;
@@ -98,8 +84,6 @@ router.post('/broadcast', requireAdmin, async (req, res) => {
 
     if (!userIds.length) return res.status(400).json({ error: 'Нет получателей' });
 
-    // Массовая рассылка из админки без явного типа — это «системное» сообщение,
-    // а не статус заказа (иначе по словам в тексте могло бы определиться как заказ).
     const effectiveType = type || (target === 'all' ? 'system' : undefined);
     const { sent } = await deliverNotifications(userIds, { title, text, buttonText, buttonUrl, type: effectiveType, link });
 

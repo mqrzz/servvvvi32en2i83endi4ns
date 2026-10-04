@@ -3,7 +3,7 @@ const pool = require('../db/pool');
 const { requireAdmin } = require('../middleware/requireAuth');
 
 const router = express.Router();
-router.use(requireAdmin); // вся почта поддержки — только для админа, публичной части здесь нет
+router.use(requireAdmin);
 
 function wrap(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch((err) => {

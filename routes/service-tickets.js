@@ -29,13 +29,11 @@ function toClient(t) {
   };
 }
 
-// ── GET /api/service-tickets/admin/all ── все заявки (только админ)
 router.get('/admin/all', requireAdmin, async (req, res) => {
   const { rows } = await pool.query('SELECT * FROM service_tickets ORDER BY created_at DESC');
   res.json(rows.map(toClient));
 });
 
-// ── GET /api/service-tickets ── свои заявки (опционально фильтр по orderId через query)
 router.get('/', requireAuth, async (req, res) => {
   const { orderId } = req.query;
   const params = [req.user.id];
@@ -49,7 +47,6 @@ router.get('/', requireAuth, async (req, res) => {
   res.json(rows.map(toClient));
 });
 
-// ── GET /api/service-tickets/:id ── один тикет (владелец, включая доступ через сервисный токен)
 router.get('/:id', requireUserOrService, async (req, res) => {
   const { rows } = await pool.query('SELECT * FROM service_tickets WHERE id = $1', [req.params.id]);
   if (rows.length === 0) return res.status(404).json({ error: 'Заявка не найдена' });
@@ -60,25 +57,6 @@ router.get('/:id', requireUserOrService, async (req, res) => {
   res.json(toClient(ticket));
 });
 
-// ── POST /api/service-tickets ── создать заявку на доработку
-//
-// Раньше billing ('subscription' | 'once') присылал клиент, и сервер ему
-// просто верил: заявка с billing='subscription' сразу уходила в очередь
-// со статусом 'open' без всякой оплаты и без проверки, есть ли у заказа
-// вообще активная подписка. Плюс лимит заявок в месяц ("5 из 5") проверялся
-// только в JS на фронте (profile/tickets.html) — реальный API количество
-// никак не считал. Итог: имея токен, можно было создавать неограниченное
-// число бесплатных заявок, просто присылая нужный billing руками.
-//
-// Теперь billing целиком решает сервер:
-//  - есть активная подписка (service_subscriptions, status='active',
-//    period_end > now) и tickets_used < лимита тарифа → списываем заявку
-//    в счёт подписки (billing='subscription', сразу 'open'), атомарно
-//    инкрементируя tickets_used, чтобы гонка параллельных запросов не дала
-//    провести больше заявок, чем позволяет лимит;
-//  - активной подписки нет ИЛИ лимит на этот период исчерпан → заявка
-//    создаётся как billing='once', status='awaiting_payment' — платёж
-//    (mqrz createPayment, type=ticket_once) переводит её в 'open' сам.
 router.post('/', requireAuth, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -120,8 +98,6 @@ router.post('/', requireAuth, async (req, res) => {
           subscriptionId = sub.id;
           initialStatus = 'open';
         }
-        // updated.length === 0 значит лимит исчерпал кто-то параллельно между
-        // SELECT и UPDATE — падаем обратно на billing='once', это ожидаемо.
       }
     }
 
@@ -143,7 +119,6 @@ router.post('/', requireAuth, async (req, res) => {
   }
 });
 
-// ── PATCH /api/service-tickets/:id/rate ── оценка (владелец, только для завершённых заявок)
 router.patch('/:id/rate', requireAuth, async (req, res) => {
   const { rating } = req.body;
   if (!['up', 'down'].includes(rating)) {
@@ -157,7 +132,6 @@ router.patch('/:id/rate', requireAuth, async (req, res) => {
   res.json(toClient(rows[0]));
 });
 
-// ── PATCH /api/service-tickets/:id ── ответ и/или статус (только админ)
 router.patch('/:id', requireAdmin, async (req, res) => {
   const { adminReply, status } = req.body;
   const sets = [];
@@ -175,7 +149,6 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   res.json(toClient(rows[0]));
 });
 
-// ── DELETE /api/service-tickets/:id ── удалить заявку (только админ)
 router.delete('/:id', requireAdmin, async (req, res) => {
   const { rows } = await pool.query('DELETE FROM service_tickets WHERE id = $1 RETURNING id', [req.params.id]);
   if (rows.length === 0) return res.status(404).json({ error: 'Заявка не найдена' });

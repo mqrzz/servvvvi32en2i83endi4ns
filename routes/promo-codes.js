@@ -19,13 +19,11 @@ function toClient(p) {
   };
 }
 
-// ── GET /api/promo-codes/admin/all ── все промокоды (только админ)
 router.get('/admin/all', requireAdmin, async (req, res) => {
   const { rows } = await pool.query('SELECT * FROM promo_codes ORDER BY created_at DESC');
   res.json(rows.map(toClient));
 });
 
-// ── GET /api/promo-codes/:code ── проверить промокод (для формы заказа)
 router.get('/:code', requireAuth, async (req, res) => {
   const code = req.params.code.trim().toUpperCase();
   const { rows } = await pool.query('SELECT * FROM promo_codes WHERE UPPER(code) = $1 AND active = TRUE', [code]);
@@ -45,7 +43,6 @@ router.get('/:code', requireAuth, async (req, res) => {
   res.json({ code: promo.code, discountType: promo.discount_type, discountValue: Number(promo.discount_value) });
 });
 
-// ── POST /api/promo-codes ── создать промокод (только админ)
 router.post('/', requireAdmin, async (req, res) => {
   try {
     const { code, discountType, discountValue, expiresAt, forUserId, usageLimit } = req.body;
@@ -68,7 +65,6 @@ router.post('/', requireAdmin, async (req, res) => {
   }
 });
 
-// ── PATCH /api/promo-codes/:id ── включить/выключить, изменить лимит (только админ)
 router.patch('/:id', requireAdmin, async (req, res) => {
   const { active, usageLimit } = req.body;
   const sets = [];
@@ -88,7 +84,6 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   res.json(toClient(rows[0]));
 });
 
-// ── DELETE /api/promo-codes/:id ── удалить (только админ)
 router.delete('/:id', requireAdmin, async (req, res) => {
   const { rows } = await pool.query('DELETE FROM promo_codes WHERE id = $1 RETURNING id', [req.params.id]);
   if (rows.length === 0) return res.status(404).json({ error: 'Промокод не найден' });

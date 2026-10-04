@@ -26,10 +26,6 @@ function toClient(s) {
   };
 }
 
-// ── GET /api/subscriptions/:orderId ── подписка на конкретный заказ
-// (или null, если её никогда не оформляли) — источник истины для
-// profile/tickets.html вместо подсчёта "сколько заявок в этом месяце"
-// на клиенте по списку тикетов.
 router.get('/:orderId', requireAuth, async (req, res) => {
   const { rows: orderRows } = await pool.query('SELECT user_id FROM orders WHERE id = $1', [req.params.orderId]);
   if (orderRows.length === 0) return res.status(404).json({ error: 'Заказ не найден' });
@@ -43,7 +39,6 @@ router.get('/:orderId', requireAuth, async (req, res) => {
   res.json(toClient(rows[0] || null));
 });
 
-// ── PATCH /api/subscriptions/:orderId/auto-renew ── включить/выключить автопродление
 router.patch('/:orderId/auto-renew', requireAuth, async (req, res) => {
   const { enabled } = req.body;
   const { rows: orderRows } = await pool.query('SELECT user_id FROM orders WHERE id = $1', [req.params.orderId]);
@@ -57,15 +52,6 @@ router.patch('/:orderId/auto-renew', requireAuth, async (req, res) => {
   res.json(toClient(rows[0]));
 });
 
-// ── POST /api/subscriptions/:orderId/admin-grant ── ручная выдача/продление
-// админом (кнопки "Активировать"/"Продлить" в admin/orders.html). Раньше
-// эти кнопки писали напрямую в orders.support_active/support_expires_at
-// мимо всей остальной системы — после перехода лимита заявок на
-// service_subscriptions такая "активация" переставала реально работать:
-// клиенту показывалось "подключено", а сервер при создании заявки всё
-// равно требовал оплату, потому что настоящей подписки не было. Теперь
-// использует тот же helper, что и оплата (utils/subscriptions.js), только
-// с amount=0 — в истории продлений это видно как комплиментарную выдачу.
 router.post('/:orderId/admin-grant', requireAdmin, async (req, res) => {
   const { tariff } = req.body || {};
   if (tariff && !SUPPORT_TARIFFS[tariff]) return res.status(400).json({ error: 'Неизвестный тариф' });
@@ -82,8 +68,6 @@ router.post('/:orderId/admin-grant', requireAdmin, async (req, res) => {
       amount: 0,
       now: new Date(),
     });
-    // Синхронизируем кэш на orders.support_* — админка сейчас читает его
-    // напрямую для отображения (renderSupport в admin/orders.html).
     await client.query(
       `UPDATE orders SET support_active=TRUE, support_started_at=COALESCE(support_started_at, now()),
        support_expires_at=$1, support_tariff=$2, support_requested=FALSE WHERE id=$3`,

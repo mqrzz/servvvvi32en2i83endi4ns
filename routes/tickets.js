@@ -4,20 +4,15 @@ const { requireAuth, requireAdmin } = require('../middleware/requireAuth');
 
 const router = express.Router();
 
-// ── Файловые вложения (pdf, zip, документы офиса, txt/csv). Картинки идут отдельно, через imageUrl.
-const MAX_FILE_BYTES = 8 * 1024 * 1024; // 8 МБ на файл (лимит тела запроса в server.js — 30 МБ)
+const MAX_FILE_BYTES = 8 * 1024 * 1024;
 const ALLOWED_FILE_EXT = ['pdf', 'zip', 'rar', '7z', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'csv', 'rtf', 'odt', 'ods'];
 
-// Картинки идут строкой data:image/...;base64,... прямо в <img src="..."> у клиента и в админке —
-// поэтому пропускаем строго base64 png/jpg/webp/gif, без кавычек и прочих символов (иначе через
-// imageUrl можно было бы протащить разметку и выполнить чужой скрипт в админке — stored XSS).
 const IMAGE_URL_RE = /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/;
 function checkImageUrl(u) {
   if (u == null || u === '') return;
   if (typeof u !== 'string' || u.length > 12000000 || !IMAGE_URL_RE.test(u)) throw new Error('Некорректное изображение (нужен png, jpg, webp или gif)');
 }
 
-// Проверяет { name, dataUrl } от клиента и возвращает нормализованный объект или бросает Error с текстом для пользователя.
 function parseFile(file) {
   if (!file || typeof file !== 'object') return null;
   const name = String(file.name || '').trim().slice(0, 180);
@@ -61,22 +56,18 @@ function toClientMessage(m) {
     sender: m.sender,
     text: m.text,
     imageUrl: m.image_url,
-    // Сам файл отдаётся отдельным запросом (GET /:id/messages/:mid/file) — в списке только метаданные
     file: m.file_name ? { name: m.file_name, mime: m.file_mime, size: m.file_size } : null,
     createdAt: m.created_at,
   };
 }
 
-// Список сообщений не тянет file_data (base64 может весить мегабайты)
 const MESSAGE_COLS = 'id, ticket_id, sender, text, image_url, file_name, file_mime, file_size, created_at';
 
-// ── GET /api/tickets/admin/all ── все тикеты (только админ) — выше /:id по той же причине, что и в orders.js
 router.get('/admin/all', requireAdmin, async (req, res) => {
   const { rows } = await pool.query('SELECT * FROM tickets ORDER BY updated_at DESC');
   res.json(rows.map(toClientTicket));
 });
 
-// ── GET /api/tickets ── список своих тикетов
 router.get('/', requireAuth, async (req, res) => {
   const { rows } = await pool.query(
     'SELECT * FROM tickets WHERE user_id = $1 ORDER BY updated_at DESC',
@@ -85,7 +76,6 @@ router.get('/', requireAuth, async (req, res) => {
   res.json(rows.map(toClientTicket));
 });
 
-// ── POST /api/tickets ── создать тикет + первое сообщение
 router.post('/', requireAuth, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -117,7 +107,6 @@ router.post('/', requireAuth, async (req, res) => {
   }
 });
 
-// ── GET /api/tickets/:id ── один тикет (владелец или админ)
 router.get('/:id', requireAuth, async (req, res) => {
   const { rows } = await pool.query('SELECT * FROM tickets WHERE id = $1', [req.params.id]);
   if (rows.length === 0) return res.status(404).json({ error: 'Обращение не найдено' });
@@ -128,7 +117,6 @@ router.get('/:id', requireAuth, async (req, res) => {
   res.json(toClientTicket(ticket));
 });
 
-// ── GET /api/tickets/:id/messages ── сообщения тикета
 router.get('/:id/messages', requireAuth, async (req, res) => {
   const { rows: tRows } = await pool.query('SELECT user_id FROM tickets WHERE id = $1', [req.params.id]);
   if (tRows.length === 0) return res.status(404).json({ error: 'Обращение не найдено' });
@@ -142,7 +130,6 @@ router.get('/:id/messages', requireAuth, async (req, res) => {
   res.json(rows.map(toClientMessage));
 });
 
-// ── POST /api/tickets/:id/messages ── отправить сообщение (владелец или админ)
 router.post('/:id/messages', requireAuth, async (req, res) => {
   try {
     const { text, imageUrl, asAdmin } = req.body;
@@ -157,21 +144,8 @@ router.post('/:id/messages', requireAuth, async (req, res) => {
     const isAdmin = req.user.role === 'admin';
     if (!isOwner && !isAdmin) return res.status(403).json({ error: 'Доступ запрещён' });
 
-    // ВАЖНО: раньше "кто пишет" определялось по владению тикетом
-    // (isAdmin && !isOwner) — это ломалось, если админ отвечал в СВОЙ
-    // собственный тикет (например, при тестировании): сообщение подписывалось
-    // как 'user', хотя писал именно админ. Теперь клиент явно говорит, с
-    // какой страницы пришёл запрос (asAdmin=true шлёт только admin/chats.html),
-    // и это имеет приоритет — но подделать это может только тот, у кого
-    // реально role='admin' в базе.
     const sender = (asAdmin && isAdmin) ? 'admin' : 'user';
 
-    // ВАЖНО: раньше сообщение от клиента в закрытый тикет тихо переоткрывало
-    // его ('status = open' ниже). Теперь по просьбе — закрытый тикет для
-    // клиента доступен только на чтение + оценку; чтобы продолжить разговор,
-    // нужно явно создать новый тикет. Админ по-прежнему может писать в
-    // закрытый тикет как раньше — это не менялось, ветка ниже (sender==='admin')
-    // как и была, переоткрывает тикет.
     if (sender === 'user' && ticket.status === 'done') {
       return res.status(403).json({ error: 'Тикет закрыт. Создайте новый, чтобы продолжить разговор.' });
     }
@@ -182,20 +156,11 @@ router.post('/:id/messages', requireAuth, async (req, res) => {
       [req.params.id, sender, text || null, imageUrl || null, file?.name || null, file?.mime || null, file?.size || null, file?.dataUrl || null]
     );
 
-    // Обновляем тикет: время + статус (переоткрываем, если юзер написал в закрытый).
-    // is_read = увидел ли КЛИЕНТ последний ответ, admin_read = увидел ли АДМИН
-    // последнее сообщение — это два независимых флага, каждый смотрит на
-    // "чужую" сторону переписки.
     if (sender === 'admin') {
       await pool.query(
         `UPDATE tickets SET updated_at = now(), status = 'open', is_read = FALSE, admin_read = TRUE WHERE id = $1`,
         [req.params.id]
       );
-      // ВАЖНО: пуш в Telegram сюда НЕ добавляем — admin/chats.html после
-      // отправки сообщения сам дёргает POST /api/notifications/broadcast
-      // (функция notifyClient), а тот роут уже отправляет уведомление в
-      // Telegram сам. Если продублировать здесь — клиент получит одно и то
-      // же сообщение в боте дважды (ровно это и произошло при первой версии).
     } else {
       await pool.query(
         `UPDATE tickets SET updated_at = now(), status = 'open', is_read = TRUE, admin_read = FALSE WHERE id = $1`,
@@ -210,7 +175,6 @@ router.post('/:id/messages', requireAuth, async (req, res) => {
   }
 });
 
-// ── GET /api/tickets/:id/messages/:mid/file ── скачать вложение сообщения (владелец или админ)
 router.get('/:id/messages/:mid/file', requireAuth, async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -229,7 +193,6 @@ router.get('/:id/messages/:mid/file', requireAuth, async (req, res) => {
     res.setHeader('Content-Type', rows[0].file_mime || 'application/octet-stream');
     res.setHeader('Content-Length', buf.length);
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    // Всегда как вложение (не открываем в браузере) — защита от XSS через загруженные файлы
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(rows[0].file_name || 'file')}`);
     res.send(buf);
   } catch (err) {
@@ -238,8 +201,6 @@ router.get('/:id/messages/:mid/file', requireAuth, async (req, res) => {
   }
 });
 
-// ── PATCH /api/tickets/:id/rate ── оценить работу поддержки по закрытому тикету (только владелец)
-// Тело: { rating: 1..5, comment?: string }. Оценку можно поменять, пока тикет в статусе 'done'.
 router.patch('/:id/rate', requireAuth, async (req, res) => {
   try {
     const rating = Number(req.body?.rating);
@@ -264,7 +225,6 @@ router.patch('/:id/rate', requireAuth, async (req, res) => {
   }
 });
 
-// ── PATCH /api/tickets/:id/read ── отметить прочитанным (владелец)
 router.patch('/:id/read', requireAuth, async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -279,7 +239,6 @@ router.patch('/:id/read', requireAuth, async (req, res) => {
   }
 });
 
-// ── PATCH /api/tickets/:id/admin-read ── отметить прочитанным админом
 router.patch('/:id/admin-read', requireAdmin, async (req, res) => {
   try {
     const { rows } = await pool.query('UPDATE tickets SET admin_read = TRUE WHERE id = $1 RETURNING id', [req.params.id]);
@@ -291,7 +250,6 @@ router.patch('/:id/admin-read', requireAdmin, async (req, res) => {
   }
 });
 
-// ── DELETE /api/tickets/:id ── удалить обращение целиком (только админ)
 router.delete('/:id', requireAdmin, async (req, res) => {
   try {
     const { rows } = await pool.query('DELETE FROM tickets WHERE id = $1 RETURNING id', [req.params.id]);
@@ -303,7 +261,6 @@ router.delete('/:id', requireAdmin, async (req, res) => {
   }
 });
 
-// ── POST /api/tickets/admin/create ── создать тикет от лица админа (для конкретного юзера)
 router.post('/admin/create', requireAdmin, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -336,7 +293,6 @@ router.post('/admin/create', requireAdmin, async (req, res) => {
   }
 });
 
-// ── PATCH /api/tickets/:id/status ── смена статуса (только админ)
 router.patch('/:id/status', requireAdmin, async (req, res) => {
   const { status } = req.body;
   if (!['open', 'done'].includes(status)) return res.status(400).json({ error: 'Некорректный статус' });

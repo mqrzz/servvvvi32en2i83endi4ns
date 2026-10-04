@@ -20,8 +20,6 @@ function ghReady(req, res, next) {
   next();
 }
 
-// ── Разделы блога, которые устроены как «статья на файл» ──
-// (Обновления — отдельная система, таймлайн на одной странице, см. ниже)
 const SECTIONS = {
   articles: { dir: 'articles', index: 'articles/index.html', cardClass: 'a-card', homeSync: true },
   news: { dir: 'news', index: 'news/index.html', cardClass: 'news-card', homeSync: false },
@@ -40,12 +38,9 @@ const UPDATES_PATH = 'updates/index.html';
 const HOME_CARDS_LIMIT = 6;
 const UPDATES_LIMIT = 3;
 
-// Границы «редактируемого тела» — от подключения nav до подключения footer-скрипта.
-// Единая граница подходит и для articles/, и для news/ (кнопка «наверх» есть не везде).
 const NAV_SCRIPT_RE = /<script src="https:\/\/blog\.antviz\.ru\/blog-nav\.js" data-page="[^"]*"><\/script>/;
 const FOOTER_SCRIPT_RE = /<script src="https:\/\/blog\.antviz\.ru\/blog-footer\.js"[^>]*><\/script>/;
 
-// ── Библиотека иконок для карточек — взяты из существующего дизайна ──
 const ICONS = {
   search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>',
   globe: '<circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>',
@@ -69,7 +64,6 @@ const ICONS = {
 const ICON_SVG_WRAP = (path) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${path}</svg>`;
 const ARROW_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>';
 const CLOCK_ICON = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>';
-// Иконки для пунктов таймлайна обновлений — фиксированные, по типу (add/fix/change), не выбираются вручную.
 const KIND_ICONS = {
   add: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>',
   fix: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="m9 12 2 2 4-4"/><circle cx="12" cy="12" r="10"/></svg>',
@@ -100,9 +94,6 @@ function readingTimeMinutes(html) {
   return Math.max(1, Math.round(words / 200));
 }
 
-// ────────────────────────────────────────────────────────────────
-// Статьи/новости: голова патчится точечно, тело — сырой HTML как есть.
-// ────────────────────────────────────────────────────────────────
 function splitArticle(html) {
   const navMatch = html.match(NAV_SCRIPT_RE);
   const footerMatch = html.match(FOOTER_SCRIPT_RE);
@@ -116,7 +107,7 @@ function extractMeta(html) {
   const get = (re) => { const m = html.match(re); return m ? m[1] : ''; };
   const cmsMetaRaw = get(/<!-- cms-meta: ([A-Za-z0-9+/=]+) -->/);
   let cmsMeta = {};
-  if (cmsMetaRaw) { try { cmsMeta = JSON.parse(Buffer.from(cmsMetaRaw, 'base64').toString('utf-8')); } catch (e) { /* игнорируем битый комментарий, не роняем парсинг */ } }
+  if (cmsMetaRaw) { try { cmsMeta = JSON.parse(Buffer.from(cmsMetaRaw, 'base64').toString('utf-8')); } catch (e) { } }
   return {
     title: get(/<title>([\s\S]*?)<\/title>/),
     description: get(/<meta name="description" content="([^"]*)"/),
@@ -127,10 +118,6 @@ function extractMeta(html) {
     icon: cmsMeta.icon || '',
   };
 }
-// Экскерпт и иконка нигде в стандартных SEO-тегах не живут (это не часть
-// HTML-спеки), а нужны и для черновиков (у которых карточки ещё нет вообще).
-// Храним их в служебном HTML-комментарии — невидим на странице, переживает
-// любое число сохранений, что бы ни делали с публикацией/черновиком.
 function upsertCmsMetaComment(head, excerpt, icon) {
   const json = JSON.stringify({ excerpt: excerpt || '', icon: icon || 'grid' });
   const b64 = Buffer.from(json, 'utf-8').toString('base64');
@@ -249,9 +236,6 @@ function insertNoindex(html) {
 }
 function removeNoindex(html) { return html.replace(/\s*<meta name="robots" content="noindex"\s*\/?>/, ''); }
 
-// ────────────────────────────────────────────────────────────────
-// Git: чтение файла + атомарный коммит нескольких файлов разом
-// ────────────────────────────────────────────────────────────────
 async function getFile(path) {
   try {
     const { data } = await octokit.repos.getContent({ owner: OWNER, repo: REPO, path, ref: BRANCH });
@@ -278,14 +262,9 @@ async function commitFiles(files, message) {
   return newCommit.sha;
 }
 
-// ────────────────────────────────────────────────────────────────
-// Автопубликация черновиков по дате — вызывается по расписанию из server.js
-// (см. utils/blogAutoPublish.js). Черновик с датой публикации в прошлом или
-// сегодня публикуется сам, без захода в админку.
-// ────────────────────────────────────────────────────────────────
 async function publishDraftNow(section, slug) {
   const html = await getFile(`${SECTIONS[section].dir}/${slug}.html`);
-  if (!html || !/<meta name="robots" content="noindex"/.test(html)) return; // уже не черновик или не найден
+  if (!html || !/<meta name="robots" content="noindex"/.test(html)) return;
   const split = splitArticle(html);
   if (!split) return;
   const meta = extractMeta(html);
@@ -331,12 +310,8 @@ async function checkAndPublishDueDrafts() {
   }
 }
 
-// ────────────────────────────────────────────────────────────────
-// ОБНОВЛЕНИЯ (updates/index.html) — таймлайн версий, не файлы-статьи
-// ────────────────────────────────────────────────────────────────
 function parseUpdates(html) {
   const items = [...html.matchAll(/<div class="tl-item( major)?[^"]*"[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/g)];
-  // ^ жадный вложенный div сложно ловить регуляркой надёжно — парсим по частям ниже, это только для подсчёта позиций
   const blocks = [];
   const re = /<div class="tl-item( major)?\s*reveal">[\s\S]*?<div class="tl-card">\s*<div class="tl-head">([\s\S]*?)<\/div>\s*<ul class="tl-list">([\s\S]*?)<\/ul>\s*<\/div>\s*<\/div>/g;
   let m;
@@ -409,15 +384,9 @@ function validateUpdate(b) {
   return null;
 }
 
-// ── POST /api/blog-cms/updates ── новая запись в таймлайн ──
-// Собирает итоговый updates/index.html: новая запись первой, существующие —
-// без бейджа fresh, всего не больше UPDATES_LIMIT записей. Работает по точным
-// смещениям из parseUpdates (а не повторным regex), поэтому не может случайно
-// зацепить два блока разом.
 function applyNewUpdateEntry(html, entries, newEntry) {
   const newBlock = buildTlItem({ ...newEntry, fresh: true });
   if (!entries.length) {
-    // файл вообще без записей (не должно случаться в реальности, но не падаем)
     const insertAt = html.indexOf('<div class="tl"');
     return insertAt === -1 ? html : html.slice(0, insertAt) + newBlock + '\n\n' + html.slice(insertAt);
   }
@@ -454,7 +423,6 @@ router.post('/updates', requireAdmin, ghReady, async (req, res) => {
   }
 });
 
-// ── DELETE /api/blog-cms/updates/:version ──
 router.delete('/updates/:version', requireAdmin, ghReady, async (req, res) => {
   try {
     const html = await getFile(UPDATES_PATH);
@@ -471,7 +439,6 @@ router.delete('/updates/:version', requireAdmin, ghReady, async (req, res) => {
   }
 });
 
-// ── POST /api/blog-cms/image ──
 router.post('/image', requireAdmin, ghReady, async (req, res) => {
   const { fileName, base64, folder } = req.body || {};
   if (!fileName || !base64 || base64.length < 10) return res.status(400).json({ error: 'Некорректные данные файла' });
@@ -499,9 +466,6 @@ router.get('/build-status', requireAdmin, ghReady, async (req, res) => {
   }
 });
 
-// ────────────────────────────────────────────────────────────────
-// РОУТЫ: /:section (articles | news)
-// ────────────────────────────────────────────────────────────────
 const listCache = {};
 router.get('/:section', requireAdmin, ghReady, sectionMw, async (req, res) => {
   try {
@@ -546,8 +510,6 @@ router.get('/:section/:slug', requireAdmin, ghReady, sectionMw, async (req, res)
     if (!split) return res.status(500).json({ error: 'Не удалось разобрать структуру файла' });
     const meta = extractMeta(html);
     const draft = /<meta name="robots" content="noindex"/.test(html);
-    // excerpt/icon для старых статей (сохранённых до появления cms-meta-комментария)
-    // подстрахуем из уже существующей карточки — новые всегда берут их из комментария.
     let excerpt = meta.excerpt, icon = meta.icon;
     if (!excerpt || !icon) {
       const indexHtml = await getFile(req.section.index);

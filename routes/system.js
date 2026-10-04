@@ -6,16 +6,12 @@ const { requireAdmin } = require('../middleware/requireAuth');
 
 const router = express.Router();
 
-// df -h недоступен на Windows и падает на некоторых минимальных образах —
-// оборачиваем в промис с таймаутом, чтобы одна зависшая команда не роняла
-// весь ответ /api/system/stats.
 function getDiskUsage() {
   return new Promise((resolve) => {
     exec('df -kP /', { timeout: 3000 }, (err, stdout) => {
       if (err || !stdout) return resolve(null);
       const lines = stdout.trim().split('\n');
       if (lines.length < 2) return resolve(null);
-      // Filesystem 1024-blocks Used Available Capacity Mounted
       const parts = lines[1].trim().split(/\s+/);
       if (parts.length < 5) return resolve(null);
       const totalKb = Number(parts[1]);
@@ -43,7 +39,6 @@ function fmtUptime(sec) {
   return parts.join(' ');
 }
 
-// ── GET /api/system/stats ── память/диск сервера + бизнес-статистика (только админ) ──
 router.get('/stats', requireAdmin, async (req, res) => {
   try {
     const totalMem = os.totalmem();
@@ -53,7 +48,6 @@ router.get('/stats', requireAdmin, async (req, res) => {
 
     const disk = await getDiskUsage();
 
-    // ── Бизнес-статистика для графиков ──
     const [
       usersCountR,
       ordersByStatusR,

@@ -7,15 +7,8 @@ const { grantOrRenewSubscription } = require('../utils/subscriptions');
 
 const router = express.Router();
 
-// Окно, в течение которого последний платёж считается "недавним" для /check
-// (страница payment_success опрашивает этот роут сразу после возврата с оплаты).
 const RECENT_WINDOW_MS = 10 * 60 * 1000;
 
-// Простой машинный секрет: вебхук вызывает наш собственный Vercel-код
-// (resultUrl.js), не браузер — там нет "текущего юзера" вообще (ЮКасса
-// стучится напрямую в Vercel, а Vercel — сюда). Поэтому доверие не через
-// JWT пользователя, а через общий секрет в заголовке, известный только
-// нашему серверу и той Vercel-функции.
 function requireWebhookSecret(req, res, next) {
   const secret = req.headers['x-payment-secret'];
   if (!secret || secret !== process.env.PAYMENT_WEBHOOK_SECRET) {
@@ -24,9 +17,6 @@ function requireWebhookSecret(req, res, next) {
   next();
 }
 
-// ── POST /api/payments/webhook ── применяет результат успешного платежа.
-// Вызывается ТОЛЬКО из resultUrl.js на Vercel, который сам уже сверил
-// статус платежа напрямую с ЮКассой (тут мы этому вызову доверяем).
 router.post('/webhook', requireWebhookSecret, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -39,9 +29,6 @@ router.post('/webhook', requireWebhookSecret, async (req, res) => {
 
     await client.query('BEGIN');
 
-    // Идемпотентность: если этот paymentId уже обработан — это точно
-    // повторная доставка вебхука от ЮКассы, применять второй раз нельзя
-    // (иначе деньги задвоятся в базе, хотя реальная оплата была одна).
     const claim = await client.query(
       `INSERT INTO payment_events (payment_id, order_id, ticket_id, type, amount) VALUES ($1,$2,$3,$4,$5)
        ON CONFLICT (payment_id) DO NOTHING RETURNING payment_id`,
@@ -54,7 +41,7 @@ router.post('/webhook', requireWebhookSecret, async (req, res) => {
 
     const { rows: orderRows } = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [orderId]);
     if (orderRows.length === 0) {
-      await client.query('COMMIT'); // claim уже записан — не переигрываем, просто отмечаем
+      await client.query('COMMIT');
       return res.status(200).json({ ok: true, warning: 'order not found' });
     }
     const order = orderRows[0];
@@ -63,20 +50,10 @@ router.post('/webhook', requireWebhookSecret, async (req, res) => {
     if (pType === 'support') {
       const tariffKey = ['basic', 'priority'].includes(supportTariff) ? supportTariff : 'basic';
 
-      // Раньше это была одна UPDATE на orders (support_active/support_tariff/
-      // support_expires_at) — снепшот без истории, и лимит заявок в месяц
-      // нигде на бэке не считался (только в JS фронта, обходится прямым
-      // вызовом API). Теперь ведём отдельную запись подписки + журнал
-      // продлений через общий helper (см. utils/subscriptions.js — тем же
-      // кодом пользуется и ручная выдача админом), лимит проверяет сервер
-      // (routes/service-tickets.js).
       const { periodEnd } = await grantOrRenewSubscription(client, {
         orderId, userId: order.user_id, tariff: tariffKey, amount: outSum, now,
       });
 
-      // Кэш на orders.support_* оставляем актуальным — админка и бейджи
-      // сайдбара пока читают эти колонки напрямую, переводить их на
-      // service_subscriptions отдельным заходом.
       await client.query(
         `UPDATE orders SET support_active=TRUE, support_started_at=COALESCE(support_started_at,$1),
          support_expires_at=$2, support_tariff=$3, support_requested=FALSE,
@@ -90,15 +67,7 @@ router.post('/webhook', requireWebhookSecret, async (req, res) => {
           [now.toISOString(), ticketId]
         );
       }
-      // Разовая правка не трогает финансы самого заказа — это отдельный платёж.
     } else if (pType === 'partial') {
-      // total_price уже посчитан один раз при создании заказа, и outSum
-      // (сумма первой части, реально подтверждённая ЮKассой) — это ровно
-      // половина того числа. Пересчитывать заново (тариф+допы+промокод)
-      // здесь больше не нужно — наоборот, опасно: между созданием заказа
-      // и подтверждением оплаты промокод может успеть протухнуть, и
-      // повторный пересчёт задним числом изменит total_price на то, чего
-      // пользователь не видел и не платил.
       const total = Number(order.total_price) || outSum;
       const remaining = Math.max(0, total - outSum);
       await client.query(
@@ -107,16 +76,11 @@ router.post('/webhook', requireWebhookSecret, async (req, res) => {
          WHERE id=$5`,
         [total, outSum, remaining, now.toISOString(), orderId]
       );
-      // Письмо шлём только в момент реального перехода из черновика (-1) в
-      // "принят в работу" (0) — раньше это было прописано только в ручных
-      // admin-роутах orders.js и никогда не срабатывало для настоящей оплаты.
       if (order.status === -1 && order.client_email) {
         sendNewOrderEmail(order.client_email, {
           orderId: order.id, packageName: order.package, totalPrice: total, paymentId,
         }).catch((e) => console.error('Не удалось отправить письмо о заказе (partial):', e));
       }
-      // Счётчик использований промокода — раньше нигде не увеличивался,
-      // в админке всегда показывал 0 независимо от реальных применений.
       if (order.status === -1 && order.promo_code) {
         await client.query(`UPDATE promo_codes SET used_count = used_count + 1 WHERE UPPER(code) = UPPER($1)`, [order.promo_code]);
       }
@@ -133,12 +97,6 @@ router.post('/webhook', requireWebhookSecret, async (req, res) => {
       );
       if (order.status === 6) logStatusChange(orderId, 5, null);
     } else {
-      // Как и в partial-ветке: total_price уже посчитан один раз при
-      // создании заказа (routes/orders.js), и именно от него createPayment
-      // взял сумму к оплате — так что outSum и total_price должны совпадать
-      // по построению. Берём total_price как есть, с фолбэком на outSum
-      // (реально подтверждённая ЮKассой сумма) для старых заказов, где
-      // total_price мог быть не выставлен.
       const total = Number(order.total_price) || outSum;
       await client.query(
         `UPDATE orders SET total_price=$1, paid=TRUE, paid_amount=$1, remaining_amount=0, paid_at=$2,
@@ -168,9 +126,6 @@ router.post('/webhook', requireWebhookSecret, async (req, res) => {
   }
 });
 
-// ── GET /api/payments/mine ── все платежи текущего пользователя по всем его заказам
-// (страница кабинета «Платежи и документы»). Раньше история платежей отдавалась только
-// по одному заказу (GET /api/orders/:id/payments) — общей ленты не было.
 router.get('/mine', requireAuth, async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -200,8 +155,6 @@ router.get('/mine', requireAuth, async (req, res) => {
   }
 });
 
-// ── POST /api/payments/check ── «вернулся ли клиент с недавней успешной оплаты»
-// (вызывается из checkPayment.js на Vercel от лица юзера — requireUserOrService)
 router.post('/check', requireUserOrService, async (req, res) => {
   const { orderId, type, ticketId } = req.body;
   if (!orderId) return res.status(400).json({ error: 'orderId обязателен' });
@@ -214,8 +167,6 @@ router.post('/check', requireUserOrService, async (req, res) => {
 
   function isRecent(d) { return !!d && (Date.now() - new Date(d).getTime()) < RECENT_WINDOW_MS; }
 
-  // Номер платежа ЮKассы для отображения на payment_success — раньше не
-  // возвращался вообще, страница просто скрывала эту строку.
   async function latestPaymentId(ticketFilter) {
     const { rows } = await pool.query(
       ticketFilter

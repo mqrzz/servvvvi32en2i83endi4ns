@@ -6,10 +6,6 @@ const { sendEnterpriseApplicationAdminEmail, sendEnterpriseApplicationConfirmati
 
 const router = express.Router();
 
-// Простая, но реальная проверка формата — раньше проверялось только "не пусто",
-// поэтому в поле телефона (input type="tel" не валидирует формат вообще ничем)
-// и в остальные поля можно было прислать что угодно, включая прямой запрос
-// к API в обход формы на сайте.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PHONE_RE = /^\+?[\d\s\-()]{10,20}$/;
 const TG_RE = /^@?[a-zA-Z]\w{4,31}$/;
@@ -36,17 +32,10 @@ function toClient(a) {
   };
 }
 
-// Расширенная версия для админки — с внутренними заметками
 function toAdmin(a) {
   return { ...toClient(a), adminNotes: a.admin_notes || '' };
 }
 
-// ── POST /api/enterprise ── публичная форма (доступна и без входа в аккаунт) ──
-// Раньше заявка ни с чем не была связана — если человек уже вошёл в
-// личный кабинет и оттуда же подал заявку, узнать статус потом можно было
-// только через переписку, кабинет об этой заявке вообще не знал. Теперь,
-// если в запросе есть действующая cookie сессии, заявка привязывается к
-// аккаунту (optionalAuth не требует входа — анонимная подача работает как раньше).
 router.post('/', enterpriseLimiter, optionalAuth, async (req, res) => {
   try {
     const b = req.body || {};
@@ -87,12 +76,9 @@ router.post('/', enterpriseLimiter, optionalAuth, async (req, res) => {
     );
     const application = rows[0];
 
-    // Уведомление админу о новой заявке — не блокирует и не роняет ответ клиенту,
-    // если письмо по какой-то причине не ушло.
     sendEnterpriseApplicationAdminEmail(application).catch((e) =>
       console.error('Не удалось отправить письмо о новой заявке (админ):', e)
     );
-    // Подтверждение клиенту, что заявка принята.
     sendEnterpriseApplicationConfirmationEmail(application.email, application.name).catch((e) =>
       console.error('Не удалось отправить письмо о новой заявке (клиент):', e)
     );
@@ -104,7 +90,6 @@ router.post('/', enterpriseLimiter, optionalAuth, async (req, res) => {
   }
 });
 
-// ── GET /api/enterprise/mine ── заявки текущего пользователя (для кабинета) ──
 router.get('/mine', requireAuth, async (req, res) => {
   const { rows } = await pool.query(
     'SELECT * FROM enterprise_applications WHERE user_id = $1 ORDER BY created_at DESC',
@@ -113,20 +98,17 @@ router.get('/mine', requireAuth, async (req, res) => {
   res.json(rows.map(toClient));
 });
 
-// ── GET /api/enterprise/admin/all ── все заявки (только админ) ──
 router.get('/admin/all', requireAdmin, async (req, res) => {
   const { rows } = await pool.query('SELECT * FROM enterprise_applications ORDER BY created_at DESC');
   res.json(rows.map(toAdmin));
 });
 
-// ── GET /api/enterprise/:id ── одна заявка (только админ) ──
 router.get('/:id', requireAdmin, async (req, res) => {
   const { rows } = await pool.query('SELECT * FROM enterprise_applications WHERE id = $1', [req.params.id]);
   if (rows.length === 0) return res.status(404).json({ error: 'Заявка не найдена' });
   res.json(toAdmin(rows[0]));
 });
 
-// ── PATCH /api/enterprise/:id ── статус и заметки (только админ) ──
 router.patch('/:id', requireAdmin, async (req, res) => {
   const sets = [];
   const values = [];
@@ -153,7 +135,6 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   res.json(toAdmin(rows[0]));
 });
 
-// ── DELETE /api/enterprise/:id ── удалить заявку (только админ) ──
 router.delete('/:id', requireAdmin, async (req, res) => {
   const { rows } = await pool.query('DELETE FROM enterprise_applications WHERE id = $1 RETURNING id', [req.params.id]);
   if (rows.length === 0) return res.status(404).json({ error: 'Заявка не найдена' });

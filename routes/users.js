@@ -4,7 +4,6 @@ const { requireAdmin } = require('../middleware/requireAuth');
 
 const router = express.Router();
 
-// ── GET /api/users ── список всех пользователей (только админ, для рассылок и т.д.)
 router.get('/', requireAdmin, async (req, res) => {
   const { rows } = await pool.query(
     `SELECT id, email, display_name, role, created_at FROM users ORDER BY created_at DESC`
@@ -18,10 +17,6 @@ router.get('/', requireAdmin, async (req, res) => {
   })));
 });
 
-// ── GET /api/users/admin/all ── обогащённый список для страницы «Клиенты»:
-// сколько заказов, сколько потрачено, когда был последний заказ, привязан ли
-// телеграм, забанен ли — одним запросом, вместо ручного join по 3 страницам.
-// ВАЖНО: должен идти раньше '/', иначе не пересекается с ним (у GET '/' нет :id).
 router.get('/admin/all', requireAdmin, async (req, res) => {
   const { rows } = await pool.query(`
     SELECT
@@ -61,10 +56,6 @@ router.get('/admin/all', requireAdmin, async (req, res) => {
   })));
 });
 
-// ── DELETE /api/users/:id ── полное удаление пользователя (только админ) ──
-// Каскадно (ON DELETE CASCADE в schema.sql) удаляет всё, что на него
-// ссылается: заказы, тикеты+сообщения, заявки на обслуживание, сессии,
-// уведомления, passkeys, привязку к боту. Необратимо.
 router.delete('/:id', requireAdmin, async (req, res) => {
   if (req.params.id === req.user.id) {
     return res.status(400).json({ error: 'Нельзя удалить свой собственный аккаунт админа отсюда' });

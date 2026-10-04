@@ -1,5 +1,3 @@
-// Яндекс OAuth. Настройка приложения — в кабинете https://oauth.yandex.ru
-// (см. инструкцию, которую я прислал отдельно в чате).
 
 const YANDEX_AUTH_URL = 'https://oauth.yandex.ru/authorize';
 const YANDEX_TOKEN_URL = 'https://oauth.yandex.ru/token';
@@ -32,7 +30,7 @@ async function exchangeYandexCode(code) {
     const text = await res.text().catch(() => '');
     throw new Error(`Не удалось обменять код Яндекса на токен: ${res.status} ${text}`);
   }
-  return res.json(); // { access_token, expires_in, refresh_token, token_type }
+  return res.json();
 }
 
 async function fetchYandexUser(accessToken) {
@@ -43,7 +41,7 @@ async function fetchYandexUser(accessToken) {
     const text = await res.text().catch(() => '');
     throw new Error(`Не удалось получить данные пользователя Яндекса: ${res.status} ${text}`);
   }
-  return res.json(); // { id, login, default_email, emails, real_name, display_name, is_avatar_empty, default_avatar_id }
+  return res.json();
 }
 
 module.exports = { getYandexAuthUrl, exchangeYandexCode, fetchYandexUser };

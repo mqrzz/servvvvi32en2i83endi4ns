@@ -6,15 +6,6 @@ const fs = require('fs');
 const path = require('path');
 const { requireAdmin } = require('./middleware/requireAuth');
 
-// ВАЖНО: страховка на уровне всего процесса. Раньше одна забытая колонка
-// в БД (например admin_read у tickets) роняла ВЕСЬ сервис целиком —
-// Node с Express 4 не перехватывает исключения из async-роутов сам, и
-// необработанный reject приводил к падению всего процесса (systemd видел
-// это как "Main process exited, status=1/FAILURE" и рестартовал сервис,
-// а все пользователи в этот момент получали разрыв соединения — это и
-// было причиной "разлогинило"/"тикеты то есть то нет", хотя сама сессия
-// была в порядке). Теперь такая ошибка просто логируется и падает только
-// тот конкретный запрос, а не весь сайт для всех.
 process.on('unhandledRejection', (reason) => {
   console.error('unhandledRejection (процесс НЕ упал, только залогировано):', reason);
 });
@@ -46,15 +37,13 @@ const subscriptionsRoutes = require('./routes/subscriptions');
 const inboundEmailRoutes = require('./routes/inbound-email');
 const emailTemplatesRoutes = require('./routes/email-templates');
 const statusMonitor = require('./lib/statusMonitor');
+const { ensureConsentTable } = require('./utils/consent');
 
 const app = express();
 
-// Сервер стоит за nginx (reverse proxy), поэтому нужно доверять
-// заголовку X-Forwarded-For, чтобы req.ip и express-rate-limit
-// корректно определяли реальный IP клиента, а не падали с ошибкой.
 app.set('trust proxy', 1);
 
-app.use(express.json({ limit: '30mb' })); // см. order/index.html: вложения к заказу передаются base64 внутри JSON-тела
+app.use(express.json({ limit: '30mb' }));
 app.use(cookieParser());
 app.use(
   cors({
@@ -65,18 +54,12 @@ app.use(
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
-// ── Тех.работы: включаются/выключаются простым файлом-флагом на сервере ──
-// touch .maintenance  → включить
-// rm .maintenance     → выключить
-// Не требует перезапуска сервиса — проверяется на каждый запрос (дёшево,
-// это просто проверка существования файла на диске).
 const MAINTENANCE_FLAG_PATH = path.join(__dirname, '.maintenance');
 app.get('/api/maintenance-status', (req, res) => {
   const enabled = fs.existsSync(MAINTENANCE_FLAG_PATH);
   res.json({ enabled });
 });
 
-// Переключение тех.работ прямо из админки (без необходимости заходить по SSH)
 app.post('/api/maintenance-toggle', requireAdmin, (req, res) => {
   const enabled = fs.existsSync(MAINTENANCE_FLAG_PATH);
   if (enabled) {
@@ -108,31 +91,24 @@ app.use('/api/subscriptions', subscriptionsRoutes);
 app.use('/api/inbound-email', inboundEmailRoutes);
 app.use('/api/email-templates', emailTemplatesRoutes);
 
-// Единый обработчик ошибок — чтобы стектрейсы не улетали на фронт
 app.use((err, req, res, next) => {
   console.error(err);
   res.status(500).json({ error: 'Внутренняя ошибка сервера' });
 });
 
 const PORT = process.env.PORT || 3000;
+ensureConsentTable();
+
 app.listen(PORT, () => {
   console.log(`Antviz backend запущен на порту ${PORT}`);
-  statusMonitor.start(); // реальные самопроверки сервисов для /status, раз в 5 минут
+  statusMonitor.start();
 
-  // П.9: проверка истекающих подписок на обслуживание — раз в 6 часов,
-  // плюс один раз сразу при старте (через минуту, чтобы не мешать
-  // остальной инициализации). Долгоживущий процесс (systemd), поэтому
-  // обычный setInterval, без отдельного cron.
   setTimeout(() => checkExpiringSubscriptions().catch((e) => console.error('checkExpiringSubscriptions:', e)), 60 * 1000);
   setInterval(() => checkExpiringSubscriptions().catch((e) => console.error('checkExpiringSubscriptions:', e)), 6 * 60 * 60 * 1000);
 
-  // Автоочистка почты поддержки — письма старше 2 месяцев (см. utils/emailCleanup.js).
-  // Раз в сутки достаточно для такого окна.
   setTimeout(() => cleanupOldSupportEmails().catch((e) => console.error('cleanupOldSupportEmails:', e)), 90 * 1000);
   setInterval(() => cleanupOldSupportEmails().catch((e) => console.error('cleanupOldSupportEmails:', e)), 24 * 60 * 60 * 1000);
 
-  // Автопубликация запланированных черновиков блога (routes/blog-cms.js).
-  // Каждые 3 часа достаточно — дата публикации без привязки к часам.
   setTimeout(() => runBlogAutoPublish(), 120 * 1000);
   setInterval(() => runBlogAutoPublish(), 3 * 60 * 60 * 1000);
 });

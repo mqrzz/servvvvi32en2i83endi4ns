@@ -18,13 +18,11 @@ function toClient(r) {
   };
 }
 
-// ── GET /api/reviews/admin/all ── все отзывы (только админ)
 router.get('/admin/all', requireAdmin, async (req, res) => {
   const { rows } = await pool.query('SELECT * FROM reviews ORDER BY created_at DESC');
   res.json(rows.map(toClient));
 });
 
-// ── POST /api/reviews ── оставить отзыв на свой завершённый заказ
 router.post('/', requireAuth, async (req, res) => {
   try {
     const { orderId, stars, text } = req.body;
@@ -53,7 +51,6 @@ router.post('/', requireAuth, async (req, res) => {
   }
 });
 
-// ── PATCH /api/reviews/:id ── показать/скрыть отзыв (только админ)
 router.patch('/:id', requireAdmin, async (req, res) => {
   const { hidden } = req.body;
   const { rows } = await pool.query('UPDATE reviews SET hidden = $1 WHERE id = $2 RETURNING *', [!!hidden, req.params.id]);
@@ -61,7 +58,6 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   res.json(toClient(rows[0]));
 });
 
-// ── DELETE /api/reviews/:id ── удалить отзыв (только админ)
 router.delete('/:id', requireAdmin, async (req, res) => {
   const { rows } = await pool.query('DELETE FROM reviews WHERE id = $1 RETURNING id', [req.params.id]);
   if (rows.length === 0) return res.status(404).json({ error: 'Отзыв не найден' });
