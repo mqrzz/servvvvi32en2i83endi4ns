@@ -231,6 +231,7 @@ module.exports = {
   sendNewOrderEmail,
   sendNotificationEmail,
   sendStatusSubscribedEmail,
+  sendStatusConfirmEmail,
   sendIncidentUpdateEmail,
   sendEnterpriseApplicationAdminEmail,
   sendEnterpriseApplicationConfirmationEmail,
@@ -251,6 +252,26 @@ async function sendStatusSubscribedEmail(toEmail, unsubscribeUrl) {
     from: process.env.MAIL_FROM,
     to: toEmail,
     subject: 'Вы подписались на статус Antviz',
+    html,
+    attachments: baseAttachments(),
+  });
+}
+
+async function sendStatusConfirmEmail(toEmail, confirmUrl, unsubscribeUrl) {
+  const html = wrapEmail({
+    heading: 'Подтвердите подписку на статус Antviz',
+    bodyHtml: `
+      <p>Кто-то (надеемся, вы) указал этот адрес для уведомлений об изменении статуса сервисов Antviz.</p>
+      <p style="margin-top:12px;">Чтобы получать письма, подтвердите подписку. Если это были не вы, просто проигнорируйте письмо: без подтверждения вы ничего не получите, а адрес будет удалён через 3 суток.</p>
+      ${button('Подтвердить подписку', confirmUrl)}
+    `,
+    footerNote: `Antviz &middot; antviz.ru<br/><a href="${unsubscribeUrl}" style="color:#9a9a9e;">Не подписывался(-ась), удалить адрес</a>`,
+  });
+
+  await transporter.sendMail({
+    from: process.env.MAIL_FROM,
+    to: toEmail,
+    subject: 'Подтвердите подписку на статус Antviz',
     html,
     attachments: baseAttachments(),
   });

@@ -4,9 +4,10 @@ const rateLimit = require('express-rate-limit');
 const disposableDomains = require('disposable-email-domains');
 const pool = require('../db/pool');
 const { requireAdmin } = require('../middleware/requireAuth');
-const { sendStatusSubscribedEmail, sendIncidentUpdateEmail } = require('../utils/mailer');
+const { sendStatusSubscribedEmail, sendStatusConfirmEmail, sendIncidentUpdateEmail } = require('../utils/mailer');
 const statusMonitor = require('../lib/statusMonitor');
 const { notifySubscribers } = require('../lib/statusNotify');
+const { logConsent } = require('../utils/consent');
 
 const router = express.Router();
 
@@ -233,6 +234,9 @@ router.post('/subscribe', subscribeLimiter, async (req, res) => {
   try {
     const email = String(req.body?.email || '').trim().toLowerCase();
     if (!isValidEmail(email)) return res.status(400).json({ error: 'Введите корректный email' });
+    if (req.body?.consent !== true) {
+      return res.status(400).json({ error: 'Нужно дать согласие на обработку персональных данных' });
+    }
     if (isDisposableEmail(email)) {
       return res.status(400).json({ error: 'Временные (одноразовые) email не поддерживаются, укажите постоянный адрес' });
     }
@@ -240,26 +244,59 @@ router.post('/subscribe', subscribeLimiter, async (req, res) => {
     const captchaOk = await verifyTurnstile(req.body?.cfToken);
     if (!captchaOk) return res.status(400).json({ error: 'Не пройдена проверка капчи, попробуйте ещё раз' });
 
-    const existing = await pool.query('SELECT id FROM status_subscribers WHERE email = $1', [email]);
-    if (existing.rows.length > 0) {
+    await pool.query(
+      `DELETE FROM status_subscribers WHERE confirmed_at IS NULL AND confirm_token IS NOT NULL AND created_at < now() - interval '3 days'`
+    );
+
+    const existing = await pool.query('SELECT id, confirmed_at, unsubscribe_token FROM status_subscribers WHERE email = $1', [email]);
+    if (existing.rows.length > 0 && existing.rows[0].confirmed_at) {
       return res.json({ ok: true, alreadySubscribed: true });
     }
 
-    const token = crypto.randomBytes(24).toString('hex');
-    await pool.query(
-      `INSERT INTO status_subscribers (email, unsubscribe_token) VALUES ($1,$2)`,
-      [email, token]
-    );
-    const unsubscribeUrl = `https://antviz.ru/api/status/unsubscribe/${token}`;
+    const confirmToken = crypto.randomBytes(24).toString('hex');
+    let unsubscribeToken;
+    if (existing.rows.length > 0) {
+      unsubscribeToken = existing.rows[0].unsubscribe_token;
+      await pool.query('UPDATE status_subscribers SET confirm_token = $1 WHERE id = $2', [confirmToken, existing.rows[0].id]);
+    } else {
+      unsubscribeToken = crypto.randomBytes(24).toString('hex');
+      await pool.query(
+        `INSERT INTO status_subscribers (email, unsubscribe_token, confirm_token) VALUES ($1,$2,$3)`,
+        [email, unsubscribeToken, confirmToken]
+      );
+    }
+    await logConsent(null, ['pd'], req, 'status_subscribe', null, email);
 
-    sendStatusSubscribedEmail(email, unsubscribeUrl).catch((err) =>
-      console.error('sendStatusSubscribedEmail error:', err)
+    await sendStatusConfirmEmail(
+      email,
+      `https://antviz.ru/api/status/confirm/${confirmToken}`,
+      `https://antviz.ru/api/status/unsubscribe/${unsubscribeToken}`
     );
 
-    res.json({ ok: true, alreadySubscribed: false });
+    res.json({ ok: true, alreadySubscribed: false, needsConfirmation: true });
   } catch (err) {
     console.error('POST /api/status/subscribe error:', err);
     res.status(500).json({ error: 'Не удалось оформить подписку' });
+  }
+});
+
+router.get('/confirm/:token', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `UPDATE status_subscribers SET confirmed_at = now(), confirm_token = NULL
+       WHERE confirm_token = $1 AND confirmed_at IS NULL
+       RETURNING email, unsubscribe_token`,
+      [req.params.token]
+    );
+    if (rows.length === 0) return res.status(404).send('Ссылка недействительна или уже использована.');
+    await logConsent(null, ['pd'], req, 'status_confirm', null, rows[0].email);
+    sendStatusSubscribedEmail(rows[0].email, `https://antviz.ru/api/status/unsubscribe/${rows[0].unsubscribe_token}`).catch((err) =>
+      console.error('sendStatusSubscribedEmail error:', err)
+    );
+    res.send('Подписка подтверждена. Мы напишем, когда статус сервисов изменится. Можно закрыть эту страницу.');
+  } catch (err) {
+    console.error('GET /api/status/confirm error:', err);
+    res.status(500).send('Не удалось подтвердить подписку, попробуйте позже.');
   }
 });
 
@@ -530,7 +567,7 @@ router.get('/diagnostics', requireAdmin, async (req, res) => {
       DIAG_TARGETS.map(async (t) => ({ name: t.name, ...(await pingOne(t.url)) }))
     );
 
-    const { rows: subRows } = await pool.query('SELECT count(*)::int AS n FROM status_subscribers');
+    const { rows: subRows } = await pool.query('SELECT count(*)::int AS n FROM status_subscribers WHERE confirmed_at IS NOT NULL');
 
     res.json({ ip: ipInfo, pings, subscriberCount: subRows[0].n });
   } catch (err) {

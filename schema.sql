@@ -324,7 +324,8 @@ CREATE INDEX IF NOT EXISTS idx_support_emails_created ON support_emails(created_
 
 CREATE TABLE IF NOT EXISTS consent_log (
     id          BIGSERIAL PRIMARY KEY,
-    user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    user_id     UUID REFERENCES users(id) ON DELETE CASCADE,
+    email       TEXT,
     kind        TEXT NOT NULL,
     doc_version TEXT NOT NULL,
     source      TEXT NOT NULL,

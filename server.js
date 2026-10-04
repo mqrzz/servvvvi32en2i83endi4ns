@@ -38,6 +38,7 @@ const inboundEmailRoutes = require('./routes/inbound-email');
 const emailTemplatesRoutes = require('./routes/email-templates');
 const statusMonitor = require('./lib/statusMonitor');
 const { ensureConsentTable } = require('./utils/consent');
+const { ensureStatusSubscriberColumns } = require('./lib/statusNotify');
 
 const app = express();
 
@@ -98,6 +99,7 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 3000;
 ensureConsentTable();
+ensureStatusSubscriberColumns();
 
 app.listen(PORT, () => {
   console.log(`Antviz backend запущен на порту ${PORT}`);

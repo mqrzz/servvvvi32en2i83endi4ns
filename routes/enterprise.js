@@ -4,6 +4,8 @@ const { requireAdmin, optionalAuth, requireAuth } = require('../middleware/requi
 const { enterpriseLimiter } = require('../middleware/rateLimiters');
 const { sendEnterpriseApplicationAdminEmail, sendEnterpriseApplicationConfirmationEmail } = require('../utils/mailer');
 
+const { logConsent } = require('../utils/consent');
+
 const router = express.Router();
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -48,6 +50,9 @@ router.post('/', enterpriseLimiter, optionalAuth, async (req, res) => {
     if (!name || !telegramUsername || !email || !description) {
       return res.status(400).json({ error: 'Заполните имя, Telegram, email и описание проекта' });
     }
+    if (b.consent !== true) {
+      return res.status(400).json({ error: 'Нужно дать согласие на обработку персональных данных' });
+    }
     if (!EMAIL_RE.test(email)) {
       return res.status(400).json({ error: 'Некорректный email' });
     }
@@ -75,6 +80,7 @@ router.post('/', enterpriseLimiter, optionalAuth, async (req, res) => {
       ]
     );
     const application = rows[0];
+    await logConsent(req.user ? req.user.id : null, ['pd'], req, 'enterprise_form', null, email);
 
     sendEnterpriseApplicationAdminEmail(application).catch((e) =>
       console.error('Не удалось отправить письмо о новой заявке (админ):', e)
