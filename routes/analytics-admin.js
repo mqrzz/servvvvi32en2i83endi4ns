@@ -139,4 +139,145 @@ router.get('/visitor', async (req, res) => {
   }
 });
 
+
+/* ---------- «Узел»: модерация ---------- */
+const fs = require('fs');
+const path = require('path');
+const UZEL_UPLOAD_DIR = process.env.UZEL_UPLOAD_DIR || path.join(__dirname, '..', 'uploads', 'uzel');
+
+// изменяющие запросы только с нашего заголовка (защита от CSRF)
+function needAdminHeader(req, res, next) {
+  if (req.get('x-requested-with') !== 'antviz-admin') return res.status(403).json({ error: 'Запрос отклонён' });
+  next();
+}
+
+router.get('/uzel/summary', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT (SELECT count(*) FROM uzel_users)::int AS users,
+              (SELECT count(*) FROM uzel_users WHERE created_at > now() - interval '7 days')::int AS new_users,
+              (SELECT count(*) FROM uzel_pages)::int AS pages,
+              (SELECT count(*) FROM uzel_pages WHERE hidden)::int AS hidden,
+              (SELECT count(*) FROM uzel_events WHERE kind = 'view' AND ts > now() - interval '7 days')::int AS views7,
+              (SELECT count(*) FROM uzel_events WHERE kind = 'click' AND ts > now() - interval '7 days')::int AS clicks7,
+              (SELECT count(*) FROM uzel_reports WHERE NOT handled)::int AS open_reports`
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('analytics-admin/uzel/summary:', err);
+    res.status(500).json({ error: 'Не удалось загрузить данные Узла' });
+  }
+});
+
+router.get('/uzel/pages', async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim().toLowerCase().slice(0, 60);
+    const { rows } = await pool.query(
+      `SELECT p.id, p.slug, p.name, p.subtitle, p.avatar, p.theme, p.published, p.hidden, p.created_at, p.updated_at,
+              jsonb_array_length(p.links) AS links_count,
+              u.id AS user_id, u.email, u.banned, u.last_login_at,
+              COALESCE(v.views, 0)::int AS views7,
+              COALESCE(v.clicks, 0)::int AS clicks7,
+              (SELECT count(*) FROM uzel_reports r WHERE r.page_id = p.id AND NOT r.handled)::int AS open_reports
+         FROM uzel_pages p
+         JOIN uzel_users u ON u.id = p.user_id
+         LEFT JOIN (SELECT page_id, count(*) FILTER (WHERE kind = 'view') AS views, count(*) FILTER (WHERE kind = 'click') AS clicks
+                      FROM uzel_events WHERE ts > now() - interval '7 days' GROUP BY page_id) v ON v.page_id = p.id
+        WHERE ($1 = '' OR lower(p.slug) LIKE '%' || $1 || '%' OR lower(p.name) LIKE '%' || $1 || '%' OR lower(u.email) LIKE '%' || $1 || '%')
+        ORDER BY (SELECT count(*) FROM uzel_reports r WHERE r.page_id = p.id AND NOT r.handled) DESC, p.created_at DESC
+        LIMIT 200`,
+      [q.replace(/[%_\\]/g, '')]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('analytics-admin/uzel/pages:', err);
+    res.status(500).json({ error: 'Не удалось загрузить страницы' });
+  }
+});
+
+router.get('/uzel/reports', async (req, res) => {
+  try {
+    const all = req.query.all === '1';
+    const { rows } = await pool.query(
+      `SELECT r.id, r.reason, r.details, r.handled, r.created_at, p.id AS page_id, p.slug, p.name, p.hidden
+         FROM uzel_reports r JOIN uzel_pages p ON p.id = r.page_id
+        WHERE ($1 OR NOT r.handled)
+        ORDER BY r.handled ASC, r.created_at DESC LIMIT 200`,
+      [all]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('analytics-admin/uzel/reports:', err);
+    res.status(500).json({ error: 'Не удалось загрузить жалобы' });
+  }
+});
+
+router.post('/uzel/pages/:id/hide', needAdminHeader, async (req, res) => {
+  try {
+    const hidden = req.body && req.body.hidden === false ? false : true;
+    const r = await pool.query('UPDATE uzel_pages SET hidden = $2, updated_at = now() WHERE id = $1 RETURNING id, hidden', [parseInt(req.params.id, 10) || 0, hidden]);
+    if (!r.rows.length) return res.status(404).json({ error: 'Страница не найдена' });
+    res.json(r.rows[0]);
+  } catch (err) {
+    console.error('analytics-admin/uzel/hide:', err);
+    res.status(500).json({ error: 'Не удалось изменить страницу' });
+  }
+});
+
+// Блокировка владельца: страница скрыта, все сессии закрыты, войти по коду больше нельзя
+router.post('/uzel/pages/:id/ban', needAdminHeader, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10) || 0;
+    const p = await pool.query('SELECT user_id FROM uzel_pages WHERE id = $1', [id]);
+    if (!p.rows.length) return res.status(404).json({ error: 'Страница не найдена' });
+    const uid = p.rows[0].user_id;
+    const banned = req.body && req.body.banned === false ? false : true;
+    await pool.query('UPDATE uzel_users SET banned = $2 WHERE id = $1', [uid, banned]);
+    if (banned) {
+      await pool.query('UPDATE uzel_pages SET hidden = true, updated_at = now() WHERE id = $1', [id]);
+      await pool.query('DELETE FROM uzel_sessions WHERE user_id = $1', [uid]);
+    }
+    res.json({ ok: true, banned });
+  } catch (err) {
+    console.error('analytics-admin/uzel/ban:', err);
+    res.status(500).json({ error: 'Не удалось заблокировать владельца' });
+  }
+});
+
+// Полное удаление страницы вместе с аккаунтом (если владелец заблокирован, запись о блокировке сохраняется)
+router.post('/uzel/pages/:id/delete', needAdminHeader, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10) || 0;
+    const p = await pool.query(
+      `SELECT p.avatar, p.user_id, u.banned FROM uzel_pages p JOIN uzel_users u ON u.id = p.user_id WHERE p.id = $1`, [id]
+    );
+    if (!p.rows.length) return res.status(404).json({ error: 'Страница не найдена' });
+    const row = p.rows[0];
+    if (row.banned) {
+      // блокировку не теряем: удаляем только страницу и сессии, учётная запись остаётся заблокированной
+      await pool.query('DELETE FROM uzel_pages WHERE id = $1', [id]);
+      await pool.query('DELETE FROM uzel_sessions WHERE user_id = $1', [row.user_id]);
+    } else {
+      await pool.query('DELETE FROM uzel_users WHERE id = $1', [row.user_id]);
+    }
+    if (row.avatar && /^[a-zA-Z0-9._-]+$/.test(row.avatar)) fs.unlink(path.join(UZEL_UPLOAD_DIR, row.avatar), () => {});
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('analytics-admin/uzel/delete:', err);
+    res.status(500).json({ error: 'Не удалось удалить страницу' });
+  }
+});
+
+router.post('/uzel/reports/:id/handle', needAdminHeader, async (req, res) => {
+  try {
+    const handled = req.body && req.body.handled === false ? false : true;
+    const r = await pool.query('UPDATE uzel_reports SET handled = $2 WHERE id = $1 RETURNING id, handled', [parseInt(req.params.id, 10) || 0, handled]);
+    if (!r.rows.length) return res.status(404).json({ error: 'Жалоба не найдена' });
+    res.json(r.rows[0]);
+  } catch (err) {
+    console.error('analytics-admin/uzel/handle:', err);
+    res.status(500).json({ error: 'Не удалось обновить жалобу' });
+  }
+});
+
 module.exports = router;

@@ -40,6 +40,8 @@ const statusMonitor = require('./lib/statusMonitor');
 const { ensureConsentTable } = require('./utils/consent');
 const { ensureStatusSubscriberColumns } = require('./lib/statusNotify');
 const { ensureAnalyticsTables, cleanupOldEvents } = require('./utils/analytics');
+const { ensureUzelTables, cleanupUzel } = require('./utils/uzel');
+const uzelRoutes = require('./routes/uzel');
 const trackRoutes = require('./routes/track');
 const analyticsAdminRoutes = require('./routes/analytics-admin');
 
@@ -95,6 +97,7 @@ app.use('/api/subscriptions', subscriptionsRoutes);
 app.use('/api/inbound-email', inboundEmailRoutes);
 app.use('/api/email-templates', emailTemplatesRoutes);
 app.use('/api/track', trackRoutes);
+app.use('/api/uzel', uzelRoutes);
 app.use('/api/admin-stats', analyticsAdminRoutes);
 
 app.use((err, req, res, next) => {
@@ -106,7 +109,8 @@ const PORT = process.env.PORT || 3000;
 ensureConsentTable();
 ensureStatusSubscriberColumns();
 ensureAnalyticsTables().then(() => cleanupOldEvents());
-setInterval(() => cleanupOldEvents(), 24 * 60 * 60 * 1000);
+ensureUzelTables().then(() => cleanupUzel());
+setInterval(() => { cleanupOldEvents(); cleanupUzel(); }, 24 * 60 * 60 * 1000);
 
 app.listen(PORT, () => {
   console.log(`Antviz backend запущен на порту ${PORT}`);
