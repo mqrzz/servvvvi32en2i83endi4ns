@@ -39,6 +39,9 @@ const emailTemplatesRoutes = require('./routes/email-templates');
 const statusMonitor = require('./lib/statusMonitor');
 const { ensureConsentTable } = require('./utils/consent');
 const { ensureStatusSubscriberColumns } = require('./lib/statusNotify');
+const { ensureAnalyticsTables, cleanupOldEvents } = require('./utils/analytics');
+const trackRoutes = require('./routes/track');
+const analyticsAdminRoutes = require('./routes/analytics-admin');
 
 const app = express();
 
@@ -91,6 +94,8 @@ app.use('/api/pricing', pricingRoutes);
 app.use('/api/subscriptions', subscriptionsRoutes);
 app.use('/api/inbound-email', inboundEmailRoutes);
 app.use('/api/email-templates', emailTemplatesRoutes);
+app.use('/api/track', trackRoutes);
+app.use('/api/admin-stats', analyticsAdminRoutes);
 
 app.use((err, req, res, next) => {
   console.error(err);
@@ -100,6 +105,8 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 3000;
 ensureConsentTable();
 ensureStatusSubscriberColumns();
+ensureAnalyticsTables().then(() => cleanupOldEvents());
+setInterval(() => cleanupOldEvents(), 24 * 60 * 60 * 1000);
 
 app.listen(PORT, () => {
   console.log(`Antviz backend запущен на порту ${PORT}`);
