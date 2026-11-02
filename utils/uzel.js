@@ -2,7 +2,8 @@ const crypto = require('crypto');
 const pool = require('../db/pool');
 const icons = require('./uzel-icons');
 
-const THEMES = ['light', 'dark', 'blue', 'warm'];
+const THEMES = ['light', 'dark', 'blue', 'warm', 'mint', 'sunset', 'graphite', 'lilac'];
+const SHAPES = ['soft', 'round', 'square'];
 const RESERVED = new Set(['app', 'api', 'admin', 'assets', 'go', 'media', 'report', 'rules', 'privacy', 'login', 'logout', 'static', 'www', 'mail', 'help', 'support', 'antviz', 'uzel', 'about', 'terms', 'status', 'blog', 'robots', 'sitemap', 'favicon', 'index', 'dashboard', 'settings', 'me', 'null', 'undefined', 'test', 'root', 'system', 'security', 'billing', 'pay', 'official']);
 
 const CREATE_SQL = `
@@ -52,6 +53,7 @@ CREATE TABLE IF NOT EXISTS uzel_pages (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE uzel_pages ADD COLUMN IF NOT EXISTS ext JSONB NOT NULL DEFAULT '{}';
 CREATE TABLE IF NOT EXISTS uzel_events (
     id      BIGSERIAL PRIMARY KEY,
     page_id BIGINT NOT NULL REFERENCES uzel_pages(id) ON DELETE CASCADE,
@@ -167,6 +169,17 @@ function validatePage(input, existing) {
   out.bio = cleanText(input.bio, 300);
   out.theme = THEMES.includes(input.theme) ? input.theme : (existing ? existing.theme : 'light');
   out.published = input.published === false ? false : true;
+  const oldExt = (existing && existing.ext) || {};
+  const shape = SHAPES.includes(input.shape) ? input.shape : (oldExt.shape || 'soft');
+  const info = {};
+  const ii = input.info && typeof input.info === 'object' ? input.info : {};
+  const ph = String(ii.phone || '').replace(/[\s()-]/g, '');
+  if (ph) { if (/^\+?[0-9]{7,15}$/.test(ph)) info.phone = ph; else errors.push('Телефон: только цифры и +, от 7 до 15 цифр'); }
+  const em = String(ii.email || '').trim();
+  if (em) { if (/^[^\s@<>]{1,64}@[^\s@<>]{1,190}\.[A-Za-z]{2,}$/.test(em) && em.length <= 254) info.email = em; else errors.push('Проверьте почту в контактах'); }
+  const ad = cleanText(ii.address, 120);
+  if (ad) info.address = ad;
+  out.ext = { shape, info };
 
   const socials = [];
   const seen = new Set();
@@ -186,11 +199,19 @@ function validatePage(input, existing) {
     const title = cleanText(l.title, 60);
     const raw = String(l.url || '').trim();
     if (!title && !raw) continue;
+    if (l.kind === 'header') {
+      if (!title) continue;
+      let hid = /^[a-f0-9]{8}$/.test(String(l.id || '')) && !ids.has(l.id) ? l.id : newId();
+      ids.add(hid);
+      links.push({ id: hid, kind: 'header', title, enabled: l.enabled !== false });
+      continue;
+    }
     const url = normalizeUrl(raw);
     if (!title || !url) { errors.push(`Проверьте ссылку «${title || raw.slice(0, 30)}»`); continue; }
     let id = /^[a-f0-9]{8}$/.test(String(l.id || '')) && !ids.has(l.id) ? l.id : newId();
     ids.add(id);
-    links.push({ id, title, url, enabled: l.enabled !== false });
+    const desc = cleanText(l.desc, 80);
+    links.push(Object.assign({ id, title, url, enabled: l.enabled !== false }, desc ? { desc } : {}));
   }
   out.links = links;
 
@@ -243,6 +264,15 @@ h1{font:800 clamp(26px,6vw,32px)/1.1 Unbounded,"Golos Text",sans-serif;letter-sp
 .t-dark{background:#0b0b0d;color:#fff}.t-dark .lk a,.t-dark .soc a{background:#1e1b1d}
 .t-blue{background:linear-gradient(160deg,#4d94ff,#0055e0) fixed;color:#fff}.t-blue .lk a,.t-blue .soc a{background:#ffffff26}
 .t-warm{background:#ffe9d6;color:#2a1608}.t-warm .lk a,.t-warm .soc a{background:#fff7ef}
+.t-mint{background:#dff5e8;color:#0a2a1a}.t-mint .lk a,.t-mint .soc a,.t-mint .ct a{background:#f4fff8}
+.t-sunset{background:linear-gradient(160deg,#ff8a5b,#c2255c 60%,#5b21b6) fixed;color:#fff}.t-sunset .lk a,.t-sunset .soc a,.t-sunset .ct a{background:#ffffff26}
+.t-graphite{background:#26272b;color:#f2f2f4}.t-graphite .lk a,.t-graphite .soc a,.t-graphite .ct a{background:#34353a}
+.t-lilac{background:#ece6ff;color:#1d1236}.t-lilac .lk a,.t-lilac .soc a,.t-lilac .ct a{background:#faf8ff}
+.t-light .ct a{background:#fff;box-shadow:0 2px 0 #0b0b0d0d}.t-dark .ct a{background:#1e1b1d}.t-blue .ct a{background:#ffffff26}.t-warm .ct a{background:#fff7ef}
+.ct{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin-top:18px}.ct a{display:flex;align-items:center;gap:8px;height:44px;padding:0 16px;border-radius:999px;color:inherit;text-decoration:none;font-weight:700;font-size:15px}.ct svg{width:18px;height:18px}
+.lk small{display:block;font-weight:500;font-size:13px;opacity:.7;margin-top:2px;white-space:normal}
+.lk .hd{font:800 13px Unbounded,"Golos Text",sans-serif;letter-spacing:.02em;text-transform:uppercase;opacity:.6;margin:14px 0 -2px;text-align:left}
+.s-round .lk a{border-radius:999px}.s-square .lk a{border-radius:6px}.s-square .soc a{border-radius:8px}
 `;
 
 function renderPublicPage(page, origin) {
@@ -251,16 +281,20 @@ function renderPublicPage(page, origin) {
     ? `<img src="/api/uzel/media/${esc(page.avatar)}" alt="" width="112" height="112">`
     : esc(initials(page.name));
   const soc = (page.socials || []).filter((s) => icons.brands[s.type]).map((s) => `<a href="/api/uzel/go/${esc(page.slug)}/s-${esc(s.type)}" rel="nofollow noopener ugc" aria-label="${esc(SOCIALS[s.type] ? SOCIALS[s.type].label : s.type)}">${brandSvg(s.type)}</a>`).join('');
-  const links = (page.links || []).filter((l) => l.enabled !== false).map((l) => `<a href="/api/uzel/go/${esc(page.slug)}/${esc(l.id)}" rel="nofollow noopener ugc">${lucideSvg('link')}<span>${esc(l.title)}</span>${lucideSvg('arrow-up-right').replace('<svg', '<svg class="ar"')}</a>`).join('');
+  const links = (page.links || []).filter((l) => l.enabled !== false).map((l) => l.kind === 'header' ? `<h2 class="hd">${esc(l.title)}</h2>` : `<a href="/api/uzel/go/${esc(page.slug)}/${esc(l.id)}" rel="nofollow noopener ugc">${lucideSvg('link')}<span>${esc(l.title)}${l.desc ? `<small>${esc(l.desc)}</small>` : ''}</span>${lucideSvg('arrow-up-right').replace('<svg', '<svg class="ar"')}</a>`).join('');
+  const info = (page.ext && page.ext.info) || {};
+  const infoBtns = [info.phone ? ['i-phone', 'phone', 'Позвонить'] : null, info.email ? ['i-email', 'mail', 'Написать'] : null, info.address ? ['i-map', 'map-pin', 'Как добраться'] : null].filter(Boolean)
+    .map(([id, ic, t]) => `<a href="/api/uzel/go/${esc(page.slug)}/${id}" rel="nofollow noopener ugc">${lucideSvg(ic)}<span>${t}</span></a>`).join('');
+  const shape = (page.ext && page.ext.shape) || 'soft';
   const music = page.music ? `<a href="/api/uzel/go/${esc(page.slug)}/music" rel="nofollow noopener ugc">${lucideSvg('music')}<span>${esc(page.music.title)}</span>${lucideSvg('arrow-up-right').replace('<svg', '<svg class="ar"')}</a>` : '';
   const desc = esc(page.bio || page.subtitle || `Страница ${page.name} на Узле`);
   const img = page.avatar ? `<meta property="og:image" content="${esc(origin)}/api/uzel/media/${esc(page.avatar)}">` : '';
   return `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(page.name)} · Узел</title><meta name="description" content="${desc}"><meta name="robots" content="noindex,nofollow">
 <meta property="og:title" content="${esc(page.name)}"><meta property="og:description" content="${desc}"><meta property="og:type" content="profile">${img}
-<meta name="theme-color" content="${t === 'dark' ? '#0b0b0d' : t === 'blue' ? '#0055e0' : t === 'warm' ? '#ffe9d6' : '#f2f2f4'}">
+<meta name="theme-color" content="${({ dark: '#0b0b0d', blue: '#0055e0', warm: '#ffe9d6', mint: '#dff5e8', sunset: '#c2255c', graphite: '#26272b', lilac: '#ece6ff' })[t] || '#f2f2f4'}">
 <link rel="icon" href="${BASE}/assets/favicon.svg" type="image/svg+xml"><style>${PAGE_CSS}</style></head>
-<body class="t-${t}"><main class="w"><div class="av" style="background:${gradient(page.name)}">${avatar}</div><h1>${esc(page.name)}</h1>${page.subtitle ? `<p class="sub">${esc(page.subtitle)}</p>` : ''}${page.bio ? `<p class="bio">${esc(page.bio)}</p>` : ''}${soc ? `<div class="soc">${soc}</div>` : ''}<div class="lk">${links}${music}</div>
+<body class="t-${t} s-${shape}"><main class="w"><div class="av" style="background:${gradient(page.name)}">${avatar}</div><h1>${esc(page.name)}</h1>${page.subtitle ? `<p class="sub">${esc(page.subtitle)}</p>` : ''}${page.bio ? `<p class="bio">${esc(page.bio)}</p>` : ''}${soc ? `<div class="soc">${soc}</div>` : ''}${infoBtns ? `<div class="ct">${infoBtns}</div>` : ''}<div class="lk">${links}${music}</div>
 <div class="ft"><a href="${esc(origin)}${BASE}/">Сделано на Узле</a><a href="/api/uzel/report/${esc(page.slug)}">Пожаловаться</a></div></main></body></html>`;
 }
 
@@ -268,4 +302,4 @@ function simplePage(title, body, status) {
   return { status: status || 200, html: `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${esc(title)} · Узел</title><style>${PAGE_CSS}.card{background:#fff;border-radius:28px;padding:30px;box-shadow:0 0 0 1px #0b0b0d1a;text-align:left;width:100%}.card h1{font-size:26px;margin:0 0 12px}.card p{margin:0 0 14px;color:#4a474b}.card select,.card textarea{width:100%;border:0;background:#f2f2f4;border-radius:16px;padding:14px 16px;font:inherit;margin-bottom:12px}.card button,.card .b{display:inline-flex;align-items:center;height:52px;padding:0 24px;border-radius:16px;border:0;background:#06f;color:#fff;font:700 17px inherit;text-decoration:none;cursor:pointer}</style></head><body class="t-light"><main class="w"><div class="card">${body}</div></main></body></html>` };
 }
 
-module.exports = { BASE, ensureUzelTables, cleanupUzel, THEMES, RESERVED, SOCIALS, cleanText, validateSlug, normalizeUrl, normalizeSocial, validatePage, newId, renderPublicPage, simplePage, esc };
+module.exports = { SHAPES, BASE, ensureUzelTables, cleanupUzel, THEMES, RESERVED, SOCIALS, cleanText, validateSlug, normalizeUrl, normalizeSocial, validatePage, newId, renderPublicPage, simplePage, esc };

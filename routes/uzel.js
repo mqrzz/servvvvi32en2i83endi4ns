@@ -190,7 +190,7 @@ router.post('/auth/logout-all', needUser, async (req, res) => {
 
 /* ---------- профиль и страница ---------- */
 function pageOut(p) {
-  return p && { id: Number(p.id), slug: p.slug, name: p.name, subtitle: p.subtitle, bio: p.bio, avatar: p.avatar, theme: p.theme, socials: p.socials, links: p.links, music: p.music, published: p.published, hidden: p.hidden };
+  return p && { id: Number(p.id), slug: p.slug, name: p.name, subtitle: p.subtitle, bio: p.bio, avatar: p.avatar, theme: p.theme, socials: p.socials, links: p.links, music: p.music, ext: p.ext || {}, published: p.published, hidden: p.hidden };
 }
 
 router.get('/me', needUser, async (req, res) => {
@@ -248,15 +248,15 @@ router.put('/me/page', needUser, limiter(60 * 1000, 60), async (req, res) => {
       let row;
       if (existing) {
         row = await pool.query(
-          `UPDATE uzel_pages SET slug=$2, name=$3, subtitle=$4, bio=$5, theme=$6, socials=$7, links=$8, music=$9, published=$10, updated_at=now()
+          `UPDATE uzel_pages SET slug=$2, name=$3, subtitle=$4, bio=$5, theme=$6, socials=$7, links=$8, music=$9, published=$10, ext=$11, updated_at=now()
            WHERE user_id=$1 RETURNING *`,
-          [req.uz.user.id, slug, d.name, d.subtitle, d.bio, d.theme, JSON.stringify(d.socials), JSON.stringify(d.links), d.music ? JSON.stringify(d.music) : null, d.published]
+          [req.uz.user.id, slug, d.name, d.subtitle, d.bio, d.theme, JSON.stringify(d.socials), JSON.stringify(d.links), d.music ? JSON.stringify(d.music) : null, d.published, JSON.stringify(d.ext || {})]
         );
       } else {
         row = await pool.query(
-          `INSERT INTO uzel_pages (user_id, slug, name, subtitle, bio, theme, socials, links, music, published)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
-          [req.uz.user.id, slug, d.name, d.subtitle, d.bio, d.theme, JSON.stringify(d.socials), JSON.stringify(d.links), d.music ? JSON.stringify(d.music) : null, d.published]
+          `INSERT INTO uzel_pages (user_id, slug, name, subtitle, bio, theme, socials, links, music, published, ext)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+          [req.uz.user.id, slug, d.name, d.subtitle, d.bio, d.theme, JSON.stringify(d.socials), JSON.stringify(d.links), d.music ? JSON.stringify(d.music) : null, d.published, JSON.stringify(d.ext || {})]
         );
       }
       await pool.query('UPDATE uzel_users SET name = $2 WHERE id = $1', [req.uz.user.id, d.name]);
@@ -323,7 +323,7 @@ router.delete('/me', needUser, async (req, res) => {
 });
 
 router.get('/me/export', needUser, async (req, res) => {
-  const p = await pool.query('SELECT slug, name, subtitle, bio, theme, socials, links, music, published, created_at FROM uzel_pages WHERE user_id = $1', [req.uz.user.id]);
+  const p = await pool.query('SELECT slug, name, subtitle, bio, theme, socials, links, music, ext, published, created_at FROM uzel_pages WHERE user_id = $1', [req.uz.user.id]);
   res.setHeader('Content-Disposition', 'attachment; filename="uzel-data.json"');
   res.json({ user: req.uz.user, page: p.rows[0] || null });
 });
@@ -348,6 +348,7 @@ router.get('/me/stats', needUser, async (req, res) => {
     const names = {};
     (page.links || []).forEach((l) => { names[l.id] = l.title; });
     (page.socials || []).forEach((s) => { names['s-' + s.type] = (U.SOCIALS[s.type] || {}).label || s.type; });
+    names['i-phone'] = 'Позвонить'; names['i-email'] = 'Написать'; names['i-map'] = 'Как добраться';
     if (page.music) names.music = 'Музыка: ' + page.music.title;
     res.json({ days, series: series.rows, totals: totals.rows[0], links: links.rows.map((r) => ({ title: names[r.link_id] || 'Удалённая ссылка', clicks: r.clicks })), refs: refs.rows });
   } catch (err) {
@@ -399,14 +400,32 @@ router.get('/go/:slug/:id', limiter(60 * 1000, 120), async (req, res) => {
     const id = String(req.params.id);
     let url = null;
     if (page) {
-      if (id === 'music') url = page.music && page.music.url;
+      const inf = (page.ext && page.ext.info) || {};
+      if (id === 'i-phone' && inf.phone) url = 'tel:' + inf.phone;
+      else if (id === 'i-email' && inf.email) url = 'mailto:' + inf.email;
+      else if (id === 'i-map' && inf.address) url = 'https://yandex.ru/maps/?text=' + encodeURIComponent(inf.address);
+      else if (id === 'music') url = page.music && page.music.url;
       else if (id.startsWith('s-')) { const s = (page.socials || []).find((x) => 's-' + x.type === id); url = s && s.url; }
       else { const l = (page.links || []).find((x) => x.id === id && x.enabled !== false); url = l && l.url; }
     }
-    if (!url || !U.normalizeUrl(url)) return res.status(404).type('text').send('Ссылка не найдена');
+    if (!url || !(/^(tel|mailto):/.test(url) || U.normalizeUrl(url))) return res.status(404).type('text').send('Ссылка не найдена');
     const dev = deviceClass(req.get('user-agent'));
     if (dev !== 'bot') pool.query('INSERT INTO uzel_events (page_id, kind, link_id, device) VALUES ($1,$2,$3,$4)', [page.id, 'click', id.slice(0, 20), dev]).catch(() => {});
     res.set({ 'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-store' }).redirect(302, url);
+  } catch (err) {
+    res.status(500).type('text').send('Ошибка сервера');
+  }
+});
+
+router.get('/qr/:slug', limiter(60 * 1000, 60), async (req, res) => {
+  try {
+    const v = U.validateSlug(req.params.slug);
+    const { rows } = v.ok ? await pool.query('SELECT slug FROM uzel_pages WHERE slug = $1 AND published AND NOT hidden', [v.slug]) : { rows: [] };
+    if (!rows[0]) return res.status(404).type('text').send('Страница не найдена');
+    const svg = await require('qrcode').toString(`${ORIGIN}${U.BASE}/${rows[0].slug}`, { type: 'svg', margin: 2, errorCorrectionLevel: 'M', color: { dark: '#0b0b0d', light: '#ffffff' } });
+    res.set({ 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=3600', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'" });
+    if (req.query.dl) res.set('Content-Disposition', `attachment; filename="uzel-${rows[0].slug}.svg"`);
+    res.send(svg);
   } catch (err) {
     res.status(500).type('text').send('Ошибка сервера');
   }
