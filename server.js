@@ -110,6 +110,7 @@ ensureConsentTable();
 ensureStatusSubscriberColumns();
 ensureAnalyticsTables().then(() => cleanupOldEvents());
 ensureUzelTables().then(() => cleanupUzel());
+require('./utils/uzel-digest').scheduleDigests();
 setInterval(() => { cleanupOldEvents(); cleanupUzel(); }, 24 * 60 * 60 * 1000);
 
 app.listen(PORT, () => {

@@ -153,19 +153,68 @@ function needAdminHeader(req, res, next) {
 
 router.get('/uzel/summary', async (req, res) => {
   try {
-    const { rows } = await pool.query(
-      `SELECT (SELECT count(*) FROM uzel_users)::int AS users,
-              (SELECT count(*) FROM uzel_users WHERE created_at > now() - interval '7 days')::int AS new_users,
-              (SELECT count(*) FROM uzel_pages)::int AS pages,
-              (SELECT count(*) FROM uzel_pages WHERE hidden)::int AS hidden,
-              (SELECT count(*) FROM uzel_events WHERE kind = 'view' AND ts > now() - interval '7 days')::int AS views7,
-              (SELECT count(*) FROM uzel_events WHERE kind = 'click' AND ts > now() - interval '7 days')::int AS clicks7,
-              (SELECT count(*) FROM uzel_reports WHERE NOT handled)::int AS open_reports`
-    );
-    res.json(rows[0]);
+    const [sum, series, top] = await Promise.all([
+      pool.query(
+        `SELECT (SELECT count(*) FROM uzel_users)::int AS users,
+                (SELECT count(*) FROM uzel_users WHERE created_at > now() - interval '7 days')::int AS new_users,
+                (SELECT count(*) FROM uzel_users WHERE plan IN ('pro','business') AND (plan_until IS NULL OR plan_until > now()))::int AS pro,
+                (SELECT count(*) FROM uzel_pages)::int AS pages,
+                (SELECT count(*) FROM uzel_pages WHERE hidden)::int AS hidden,
+                (SELECT count(*) FROM uzel_events WHERE kind = 'view' AND ts > now() - interval '7 days')::int AS views7,
+                (SELECT count(*) FROM uzel_events WHERE kind = 'click' AND ts > now() - interval '7 days')::int AS clicks7,
+                (SELECT count(*) FROM uzel_leads WHERE created_at > now() - interval '7 days')::int AS leads7,
+                (SELECT count(*) FROM uzel_reports WHERE NOT handled)::int AS open_reports`),
+      pool.query(
+        `SELECT to_char(d::date, 'YYYY-MM-DD') AS day, COALESCE(v.views, 0)::int AS views, COALESCE(v.clicks, 0)::int AS clicks, COALESCE(n.users, 0)::int AS users
+           FROM generate_series((now() AT TIME ZONE '${TZ}')::date - 13, (now() AT TIME ZONE '${TZ}')::date, interval '1 day') d
+           LEFT JOIN (SELECT (ts AT TIME ZONE '${TZ}')::date AS day, count(*) FILTER (WHERE kind = 'view') AS views, count(*) FILTER (WHERE kind = 'click') AS clicks
+                        FROM uzel_events WHERE ts > now() - interval '15 days' GROUP BY 1) v ON v.day = d::date
+           LEFT JOIN (SELECT (created_at AT TIME ZONE '${TZ}')::date AS day, count(*) AS users FROM uzel_users WHERE created_at > now() - interval '15 days' GROUP BY 1) n ON n.day = d::date
+          ORDER BY d`),
+      pool.query(
+        `SELECT p.slug, p.name, count(*) FILTER (WHERE e.kind = 'view')::int AS views, count(*) FILTER (WHERE e.kind = 'click')::int AS clicks
+           FROM uzel_events e JOIN uzel_pages p ON p.id = e.page_id WHERE e.ts > now() - interval '7 days'
+          GROUP BY p.id ORDER BY views DESC LIMIT 5`),
+    ]);
+    res.json(Object.assign({}, sum.rows[0], { series: series.rows, top: top.rows }));
   } catch (err) {
     console.error('analytics-admin/uzel/summary:', err);
     res.status(500).json({ error: 'Не удалось загрузить данные Узла' });
+  }
+});
+
+const lim = (req) => Math.min(500, Math.max(10, parseInt(req.query.limit, 10) || 30));
+router.get('/uzel/users', async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim().toLowerCase().slice(0, 60).replace(/[%_\\]/g, '');
+    const { rows } = await pool.query(
+      `SELECT u.id, u.email, u.name, u.banned, u.plan, u.plan_until, u.created_at, u.last_login_at,
+              p.slug, p.hidden, (SELECT count(*) FROM uzel_leads l WHERE l.page_id = p.id)::int AS leads,
+              (SELECT count(*) FROM uzel_payments x WHERE x.user_id = u.id AND x.status = 'succeeded')::int AS payments
+         FROM uzel_users u LEFT JOIN uzel_pages p ON p.user_id = u.id
+        WHERE ($1 = '' OR lower(u.email) LIKE '%' || $1 || '%' OR lower(COALESCE(u.name, '')) LIKE '%' || $1 || '%' OR lower(COALESCE(p.slug, '')) LIKE '%' || $1 || '%')
+        ORDER BY u.created_at DESC LIMIT $2`, [q, lim(req)]);
+    res.json(rows.map((r) => Object.assign({}, r, { pro: (r.plan === 'pro' || r.plan === 'business') && (!r.plan_until || new Date(r.plan_until).getTime() > Date.now()) })));
+  } catch (err) {
+    console.error('analytics-admin/uzel/users:', err);
+    res.status(500).json({ error: 'Не удалось загрузить пользователей' });
+  }
+});
+
+// Выдать или забрать Pro вручную. days = 0 с plan=free снимает тариф; plan=pro без days даёт 31 день
+router.post('/uzel/users/:id/plan', needAdminHeader, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10) || 0;
+    const plan = req.body && ['pro', 'business'].includes(req.body.plan) ? req.body.plan : 'free';
+    const days = Math.min(3660, Math.max(1, parseInt(req.body && req.body.days, 10) || 31));
+    const r = plan !== 'free'
+      ? await pool.query("UPDATE uzel_users SET plan = $3, plan_until = GREATEST(COALESCE(plan_until, now()), now()) + ($2::int * interval '1 day') WHERE id = $1 RETURNING plan, plan_until", [id, days, plan])
+      : await pool.query("UPDATE uzel_users SET plan = 'free', plan_until = NULL WHERE id = $1 RETURNING plan, plan_until", [id]);
+    if (!r.rows.length) return res.status(404).json({ error: 'Пользователь не найден' });
+    res.json({ ok: true, plan: r.rows[0].plan, plan_until: r.rows[0].plan_until });
+  } catch (err) {
+    console.error('analytics-admin/uzel/plan:', err);
+    res.status(500).json({ error: 'Не удалось изменить тариф' });
   }
 });
 
@@ -175,7 +224,7 @@ router.get('/uzel/pages', async (req, res) => {
     const { rows } = await pool.query(
       `SELECT p.id, p.slug, p.name, p.subtitle, p.avatar, p.theme, p.published, p.hidden, p.created_at, p.updated_at,
               jsonb_array_length(p.links) AS links_count,
-              u.id AS user_id, u.email, u.banned, u.last_login_at,
+              u.id AS user_id, u.email, u.banned, u.last_login_at, (u.plan IN ('pro','business') AND (u.plan_until IS NULL OR u.plan_until > now())) AS pro,
               COALESCE(v.views, 0)::int AS views7,
               COALESCE(v.clicks, 0)::int AS clicks7,
               (SELECT count(*) FROM uzel_reports r WHERE r.page_id = p.id AND NOT r.handled)::int AS open_reports
@@ -185,8 +234,8 @@ router.get('/uzel/pages', async (req, res) => {
                       FROM uzel_events WHERE ts > now() - interval '7 days' GROUP BY page_id) v ON v.page_id = p.id
         WHERE ($1 = '' OR lower(p.slug) LIKE '%' || $1 || '%' OR lower(p.name) LIKE '%' || $1 || '%' OR lower(u.email) LIKE '%' || $1 || '%')
         ORDER BY (SELECT count(*) FROM uzel_reports r WHERE r.page_id = p.id AND NOT r.handled) DESC, p.created_at DESC
-        LIMIT 200`,
-      [q.replace(/[%_\\]/g, '')]
+        LIMIT $2`,
+      [q.replace(/[%_\\]/g, ''), lim(req)]
     );
     res.json(rows);
   } catch (err) {
@@ -202,8 +251,8 @@ router.get('/uzel/reports', async (req, res) => {
       `SELECT r.id, r.reason, r.details, r.handled, r.created_at, p.id AS page_id, p.slug, p.name, p.hidden
          FROM uzel_reports r JOIN uzel_pages p ON p.id = r.page_id
         WHERE ($1 OR NOT r.handled)
-        ORDER BY r.handled ASC, r.created_at DESC LIMIT 200`,
-      [all]
+        ORDER BY r.handled ASC, r.created_at DESC LIMIT $2`,
+      [all, lim(req)]
     );
     res.json(rows);
   } catch (err) {

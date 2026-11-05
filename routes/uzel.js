@@ -6,7 +6,9 @@ const rateLimit = require('express-rate-limit');
 const sharp = require('sharp');
 const pool = require('../db/pool');
 const U = require('../utils/uzel');
-const { transporter, wrapEmail, baseAttachments } = require('../utils/mailer');
+const mailer = require('../utils/mailer');
+const { sendWebhook } = require('../utils/uzel-hooks');
+const { transporter } = mailer;
 const { cleanIp, deviceClass } = require('../utils/analytics');
 
 const router = express.Router();
@@ -16,6 +18,10 @@ const SESSION_DAYS = 30;
 const PEPPER = process.env.UZEL_PEPPER || process.env.JWT_SECRET || 'uzel';
 const ORIGIN = process.env.UZEL_ORIGIN || 'https://antviz.ru';
 const DEV = process.env.UZEL_INSECURE_COOKIE === '1';
+const { buildReceipt } = require('../utils/receipt');
+const YK_API = process.env.YOOKASSA_API || 'https://api.yookassa.ru/v3';
+const ykOn = () => !!(process.env.YOOKASSA_SHOP_ID && process.env.YOOKASSA_SECRET_KEY);
+const ykAuth = () => 'Basic ' + Buffer.from(`${process.env.YOOKASSA_SHOP_ID}:${process.env.YOOKASSA_SECRET_KEY}`).toString('base64');
 const UPLOAD_DIR = process.env.UZEL_UPLOAD_DIR || path.join(__dirname, '..', 'uploads', 'uzel');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
@@ -29,7 +35,7 @@ function limiter(windowMs, max, message) {
 /* ---------- защита от CSRF для изменяющих запросов ---------- */
 function csrf(req, res, next) {
   if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next();
-  if (req.path.startsWith('/report')) return next();
+  if (req.path.startsWith('/report') || req.path.startsWith('/lead') || req.path.startsWith('/pay')) return next();
   if (req.get('x-requested-with') !== 'uzel') return res.status(403).json({ error: 'Запрос отклонён' });
   const origin = req.get('origin');
   if (origin && origin !== ORIGIN && !(DEV && /^http:\/\/localhost(:\d+)?$/.test(origin))) {
@@ -60,7 +66,7 @@ async function loadSession(req) {
   const token = req.cookies && req.cookies[COOKIE];
   if (!token || !/^[a-f0-9]{64}$/.test(token)) return null;
   const { rows } = await pool.query(
-    `SELECT s.id AS sid, s.last_seen_at, u.id, u.email, u.name, u.banned
+    `SELECT s.id AS sid, s.last_seen_at, u.id, u.email, u.name, u.banned, u.plan, u.plan_until
      FROM uzel_sessions s JOIN uzel_users u ON u.id = s.user_id
      WHERE s.token_hash = $1 AND s.expires_at > now()`,
     [sha(token)]
@@ -70,7 +76,7 @@ async function loadSession(req) {
   if (Date.now() - new Date(r.last_seen_at).getTime() > 5 * 60 * 1000) {
     pool.query('UPDATE uzel_sessions SET last_seen_at = now() WHERE id = $1', [r.sid]).catch(() => {});
   }
-  return { sid: Number(r.sid), user: { id: Number(r.id), email: r.email, name: r.name } };
+  return { sid: Number(r.sid), user: { id: Number(r.id), email: r.email, name: r.name, plan: U.planOf(r), plan_until: r.plan_until } };
 }
 
 async function needUser(req, res, next) {
@@ -109,11 +115,9 @@ router.post('/auth/send-code', limiter(60 * 60 * 1000, 20, 'Слишком мн�
     );
     if (process.env.UZEL_DEV_LOG_CODES === '1') console.log(`[uzel dev] код для ${email}: ${code}`);
     try {
-      const html = wrapEmail({
-        heading: 'Код для входа в Узел',
-        bodyHtml: `<p>Ваш код:</p><div style="font:800 36px/1 Arial,sans-serif;letter-spacing:8px;background:#f2f2f4;border-radius:20px;padding:22px 0;text-align:center;margin:16px 0">${code}</div><p>Код действует 10 минут. Если вы не запрашивали вход, просто проигнорируйте письмо.</p>`,
-      });
-      await transporter.sendMail({ from: process.env.MAIL_FROM, to: email, subject: 'Код для входа в Узел', html, attachments: baseAttachments() });
+      const lang = req.body && req.body.lang === 'en' ? 'en' : 'ru';
+      const mail = mailer.uzelCodeEmail({ code, lang, email });
+      await transporter.sendMail({ from: process.env.MAIL_FROM, to: email, subject: mail.subject, html: mail.html, text: mail.text, attachments: mail.attachments });
     } catch (mailErr) {
       console.error('uzel/send-code: письмо не отправлено:', mailErr.message);
       if (process.env.UZEL_DEV_LOG_CODES !== '1') return res.status(502).json({ error: 'Не удалось отправить письмо. Попробуйте позже.' });
@@ -190,20 +194,26 @@ router.post('/auth/logout-all', needUser, async (req, res) => {
 
 /* ---------- профиль и страница ---------- */
 function pageOut(p) {
-  return p && { id: Number(p.id), slug: p.slug, name: p.name, subtitle: p.subtitle, bio: p.bio, avatar: p.avatar, theme: p.theme, socials: p.socials, links: p.links, music: p.music, ext: p.ext || {}, published: p.published, hidden: p.hidden };
+  return p && { id: Number(p.id), slug: p.slug, name: p.name, subtitle: p.subtitle, bio: p.bio, avatar: p.avatar, theme: p.theme, socials: p.socials, links: p.links, music: p.music, ext: p.ext || {}, url: U.pageUrl(ORIGIN, p.slug), published: p.published, hidden: p.hidden };
 }
 
 router.get('/me', needUser, async (req, res) => {
   try {
-    const [p, s] = await Promise.all([
+    const [p, s, unread, digestRow] = await Promise.all([
       pool.query('SELECT * FROM uzel_pages WHERE user_id = $1', [req.uz.user.id]),
       pool.query('SELECT id, ua, ip, created_at, last_seen_at FROM uzel_sessions WHERE user_id = $1 AND expires_at > now() ORDER BY last_seen_at DESC', [req.uz.user.id]),
+      pool.query('SELECT count(*)::int AS n FROM uzel_leads l JOIN uzel_pages p ON p.id = l.page_id WHERE p.user_id = $1 AND NOT l.is_read', [req.uz.user.id]),
+      pool.query('SELECT digest FROM uzel_users WHERE id = $1', [req.uz.user.id]),
     ]);
     res.json({
       user: req.uz.user,
       page: pageOut(p.rows[0]),
       sessions: s.rows.map((r) => ({ id: Number(r.id), device: parseUa(r.ua), ip: maskIp(r.ip), created_at: r.created_at, last_seen_at: r.last_seen_at, current: Number(r.id) === req.uz.sid })),
       origin: ORIGIN,
+      pageBase: `${ORIGIN}${U.BASE}${U.PAGE_PREFIX}/`,
+      plan: { code: req.uz.user.plan, paid: req.uz.user.plan !== 'free', business: req.uz.user.plan === 'business', until: req.uz.user.plan_until, limits: U.LIMITS[req.uz.user.plan], free: U.LIMITS.free, pro: U.LIMITS.pro, businessLimits: U.LIMITS.business, prices: U.PLAN_PRICES, pay: ykOn() },
+      unread: unread.rows[0] ? unread.rows[0].n : 0,
+      digest: !!digestRow.rows[0].digest,
     });
   } catch (err) {
     console.error('uzel/me:', err);
@@ -231,7 +241,15 @@ router.put('/me/page', needUser, limiter(60 * 1000, 60), async (req, res) => {
   try {
     const cur = await pool.query('SELECT * FROM uzel_pages WHERE user_id = $1', [req.uz.user.id]);
     const existing = cur.rows[0];
-    const v = U.validatePage(req.body || {}, existing);
+    const body = Object.assign({}, req.body || {});
+    if (existing) {
+      const e = existing.ext || {};
+      const base = { name: existing.name, subtitle: existing.subtitle, bio: existing.bio, theme: existing.theme, published: existing.published,
+        socials: (existing.socials || []).map((x) => ({ type: x.type, value: x.url })), links: existing.links || [], music: existing.music,
+        shape: e.shape, info: e.info, lang: e.lang, form: e.form, hideBadge: e.hideBadge };
+      for (const k of Object.keys(base)) if (body[k] === undefined) body[k] = base[k];
+    }
+    const v = U.validatePage(body, existing, req.uz.user.plan);
     if (!v.ok) return res.status(400).json({ error: v.errors[0], errors: v.errors });
     const d = v.data;
 
@@ -330,12 +348,12 @@ router.get('/me/export', needUser, async (req, res) => {
 
 router.get('/me/stats', needUser, async (req, res) => {
   try {
-    const days = Math.min(90, Math.max(1, parseInt(req.query.days, 10) || 14));
+    const days = Math.min(U.LIMITS[req.uz.user.plan].statsDays, Math.max(1, parseInt(req.query.days, 10) || 14));
     const p = await pool.query('SELECT id, links, socials, music FROM uzel_pages WHERE user_id = $1', [req.uz.user.id]);
     if (!p.rows.length) return res.json({ days, series: [], totals: { views: 0, clicks: 0 }, links: [], refs: [] });
     const page = p.rows[0], id = page.id;
     const since = `now() - ($2::int * interval '1 day')`;
-    const [series, totals, links, refs] = await Promise.all([
+    const [series, totals, links, refs, devs, leadsN] = await Promise.all([
       pool.query(
         `SELECT to_char(d::date,'YYYY-MM-DD') AS day, COALESCE(v.views,0)::int AS views, COALESCE(v.clicks,0)::int AS clicks
          FROM generate_series((now() AT TIME ZONE 'Europe/Moscow')::date - ($2::int - 1), (now() AT TIME ZONE 'Europe/Moscow')::date, interval '1 day') d
@@ -344,13 +362,15 @@ router.get('/me/stats', needUser, async (req, res) => {
       pool.query(`SELECT count(*) FILTER (WHERE kind='view')::int AS views, count(*) FILTER (WHERE kind='click')::int AS clicks FROM uzel_events WHERE page_id = $1 AND ts > ${since}`, [id, days]),
       pool.query(`SELECT link_id, count(*)::int AS clicks FROM uzel_events WHERE page_id = $1 AND kind='click' AND ts > ${since} GROUP BY 1 ORDER BY clicks DESC`, [id, days]),
       pool.query(`SELECT COALESCE(ref,'Прямые заходы') AS ref, count(*)::int AS views FROM uzel_events WHERE page_id = $1 AND kind='view' AND ts > ${since} GROUP BY 1 ORDER BY views DESC LIMIT 8`, [id, days]),
+      pool.query(`SELECT COALESCE(device,'desktop') AS device, count(*)::int AS views FROM uzel_events WHERE page_id = $1 AND kind='view' AND ts > ${since} GROUP BY 1 ORDER BY views DESC`, [id, days]),
+      pool.query(`SELECT count(*)::int AS n FROM uzel_leads WHERE page_id = $1 AND created_at > ${since}`, [id, days]),
     ]);
     const names = {};
     (page.links || []).forEach((l) => { names[l.id] = l.title; });
     (page.socials || []).forEach((s) => { names['s-' + s.type] = (U.SOCIALS[s.type] || {}).label || s.type; });
     names['i-phone'] = 'Позвонить'; names['i-email'] = 'Написать'; names['i-map'] = 'Как добраться';
     if (page.music) names.music = 'Музыка: ' + page.music.title;
-    res.json({ days, series: series.rows, totals: totals.rows[0], links: links.rows.map((r) => ({ title: names[r.link_id] || 'Удалённая ссылка', clicks: r.clicks })), refs: refs.rows });
+    res.json({ days, maxDays: U.LIMITS[req.uz.user.plan].statsDays, devices: devs.rows, leads: leadsN.rows[0].n, series: series.rows, totals: totals.rows[0], links: links.rows.map((r) => ({ title: names[r.link_id] || 'Удалённая ссылка', clicks: r.clicks })), refs: refs.rows });
   } catch (err) {
     console.error('uzel/stats:', err);
     res.status(500).json({ error: 'Не удалось получить статистику' });
@@ -366,7 +386,7 @@ function refHost(ref) {
   } catch { return null; }
 }
 const SEC = {
-  'Content-Security-Policy': "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+  'Content-Security-Policy': `default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'strict-origin-when-cross-origin',
 };
@@ -375,17 +395,25 @@ router.get('/render/:slug', limiter(60 * 1000, 120), async (req, res) => {
   res.set(SEC);
   try {
     const v = U.validateSlug(req.params.slug);
-    const { rows } = v.ok ? await pool.query('SELECT * FROM uzel_pages WHERE slug = $1', [v.slug]) : { rows: [] };
+    const { rows } = v.ok ? await pool.query('SELECT p.*, u.plan AS owner_plan, u.plan_until AS owner_until FROM uzel_pages p JOIN uzel_users u ON u.id = p.user_id WHERE p.slug = $1', [v.slug]) : { rows: [] };
     const page = rows[0];
+    if (page) page.owner = U.planOf({ plan: page.owner_plan, plan_until: page.owner_until });
     if (!page || !page.published || page.hidden) {
       const s = U.simplePage('Страница не найдена', `<h1>Здесь пока пусто</h1><p>${page && page.hidden ? 'Страница недоступна.' : 'Такой страницы нет. Возможно, адрес свободен.'}</p><a class="b" href="${ORIGIN}/app/">Создать свою страницу</a>`, 404);
       return res.status(s.status).type('html').send(s.html);
     }
+    if (req.get('x-uzel-subdomain') === '1') {
+      if (page.owner === 'free') {
+        const s = U.simplePage('Поддомен недоступен', `<h1>Поддомен недоступен</h1><p>Адреса вида имя.домен входят в тариф Pro. Страница доступна по обычной ссылке.</p><a class="b" href="${U.pageUrl(ORIGIN, page.slug)}">Открыть страницу</a>`, 404);
+        return res.status(s.status).type('html').send(s.html);
+      }
+    }
     const dev = deviceClass(req.get('user-agent'));
     if (dev !== 'bot' && req.get('dnt') !== '1') {
-      pool.query('INSERT INTO uzel_events (page_id, kind, ref, device) VALUES ($1,$2,$3,$4)', [page.id, 'view', refHost(req.get('referer')), dev]).catch(() => {});
+      const utm = U.cleanText(req.query.utm_source || req.query.ref || '', 40).toLowerCase().replace(/[^a-z0-9а-я._-]/g, '');
+      pool.query('INSERT INTO uzel_events (page_id, kind, ref, device) VALUES ($1,$2,$3,$4)', [page.id, 'view', utm ? 'метка: ' + utm : refHost(req.get('referer')), dev]).catch(() => {});
     }
-    res.set('Cache-Control', 'no-store').type('html').send(U.renderPublicPage(page, ORIGIN));
+    res.set('Cache-Control', 'no-store').type('html').send(U.renderPublicPage(page, ORIGIN, { plan: page.owner }));
   } catch (err) {
     console.error('uzel/render:', err);
     res.status(500).type('text').send('Ошибка сервера');
@@ -422,7 +450,7 @@ router.get('/qr/:slug', limiter(60 * 1000, 60), async (req, res) => {
     const v = U.validateSlug(req.params.slug);
     const { rows } = v.ok ? await pool.query('SELECT slug FROM uzel_pages WHERE slug = $1 AND published AND NOT hidden', [v.slug]) : { rows: [] };
     if (!rows[0]) return res.status(404).type('text').send('Страница не найдена');
-    const svg = await require('qrcode').toString(`${ORIGIN}${U.BASE}/${rows[0].slug}`, { type: 'svg', margin: 2, errorCorrectionLevel: 'M', color: { dark: '#0b0b0d', light: '#ffffff' } });
+    const svg = await require('qrcode').toString(U.pageUrl(ORIGIN, rows[0].slug), { type: 'svg', margin: 2, errorCorrectionLevel: 'M', color: { dark: '#0b0b0d', light: '#ffffff' } });
     res.set({ 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=3600', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'" });
     if (req.query.dl) res.set('Content-Disposition', `attachment; filename="uzel-${rows[0].slug}.svg"`);
     res.send(svg);
@@ -459,6 +487,215 @@ router.post('/report', limiter(60 * 60 * 1000, 8, 'Слишком много ж�
     res.type('html').send(s.html);
   } catch (err) {
     res.status(500).type('text').send('Ошибка сервера');
+  }
+});
+
+
+/* ---------- предпросмотр (сохранённая версия, клики не считаются) ---------- */
+router.get('/me/preview', needUser, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM uzel_pages WHERE user_id = $1', [req.uz.user.id]);
+    res.set(Object.assign({}, SEC, { 'Content-Security-Policy': SEC['Content-Security-Policy'].replace("frame-ancestors 'none'", "frame-ancestors 'self'"), 'Cache-Control': 'no-store', 'X-Frame-Options': 'SAMEORIGIN' }));
+    if (!rows[0]) {
+      const s = U.simplePage('Предпросмотр', '<h1>Страница ещё не создана</h1><p>Заполните профиль и сохраните его, тогда здесь появится предпросмотр.</p>');
+      return res.type('html').send(s.html);
+    }
+    res.type('html').send(U.renderPublicPage(rows[0], ORIGIN, { preview: true, plan: req.uz.user.plan }));
+  } catch (err) {
+    console.error('uzel/preview:', err);
+    res.status(500).type('text').send('Ошибка сервера');
+  }
+});
+
+/* ---------- заявки с формы ---------- */
+router.post('/lead/:slug', limiter(60 * 60 * 1000, 8, 'Слишком много заявок с вашего адреса'), express.urlencoded({ extended: false, limit: '10kb' }), async (req, res) => {
+  res.set(SEC);
+  try {
+    const v = U.validateSlug(req.params.slug);
+    const { rows } = v.ok ? await pool.query('SELECT p.*, u.email AS owner_email FROM uzel_pages p JOIN uzel_users u ON u.id = p.user_id WHERE p.slug = $1 AND p.published AND NOT p.hidden', [v.slug]) : { rows: [] };
+    const page = rows[0];
+    const form = page && page.ext && page.ext.form;
+    const en = page && page.ext && page.ext.lang === 'en';
+    if (!page || !form || !form.enabled) return res.status(404).type('text').send('Not found');
+    if (String(req.body.website || '').trim()) { // ловушка для ботов: делаем вид, что всё хорошо
+      const s = U.simplePage(en ? 'Thanks' : 'Спасибо', `<h1>${en ? 'Sent' : 'Заявка отправлена'}</h1>`);
+      return res.type('html').send(s.html);
+    }
+    const contact = U.cleanText(req.body.contact, 120);
+    if (contact.length < 5) {
+      const s = U.simplePage(en ? 'Check form' : 'Проверьте форму', `<h1>${en ? 'Add a phone or email' : 'Укажите телефон или почту'}</h1><p>${en ? 'So the owner can reply.' : 'Иначе владелец не сможет с вами связаться.'}</p><a class="b" href="javascript:history.back()">${en ? 'Back' : 'Назад'}</a>`, 400);
+      return res.status(400).type('html').send(s.html);
+    }
+    const day = await pool.query("SELECT count(*)::int AS n FROM uzel_leads WHERE page_id = $1 AND created_at > now() - interval '1 day'", [page.id]);
+    if (day.rows[0].n >= 40) {
+      const s = U.simplePage(en ? 'Try later' : 'Попробуйте позже', `<h1>${en ? 'Too many requests today' : 'Сегодня заявок уже слишком много'}</h1>`, 429);
+      return res.status(429).type('html').send(s.html);
+    }
+    const name = U.cleanText(req.body.name, 60), message = U.cleanText(req.body.message, 600);
+    await pool.query('INSERT INTO uzel_leads (page_id, name, contact, message, ip) VALUES ($1,$2,$3,$4,$5)', [page.id, name, contact, message, cleanIp(req.ip)]);
+    if (form.webhook) {
+      const ownerPlan = await pool.query('SELECT plan, plan_until FROM uzel_users WHERE id = $1', [page.user_id]);
+      if (U.planOf(ownerPlan.rows[0]) !== 'free') {
+        sendWebhook(form.webhook, form.secret || '', { event: 'lead.created', page: { slug: page.slug, name: page.name, url: U.pageUrl(ORIGIN, page.slug) }, lead: { name, contact, message, created_at: new Date().toISOString() } })
+          .then((code) => { if (code >= 400) console.error('uzel/webhook:', page.slug, 'HTTP', code); })
+          .catch((e) => console.error('uzel/webhook:', page.slug, e.message));
+      }
+    }
+    if (form.notify !== false) {
+      try {
+        const mail = mailer.uzelLeadEmail({ page: page.name, name, contact, message, link: `${ORIGIN}${U.BASE}/app/form` });
+        transporter.sendMail({ from: process.env.MAIL_FROM, to: page.owner_email, subject: mail.subject, html: mail.html, text: mail.text, attachments: mail.attachments }).catch((e) => console.error('uzel/lead mail:', e.message));
+      } catch (e) { console.error('uzel/lead mail:', e.message); }
+    }
+    const s = U.simplePage(en ? 'Thanks' : 'Спасибо', `<h1>${en ? 'Request sent' : 'Заявка отправлена'}</h1><p>${en ? 'The owner will get back to you soon.' : 'Владелец страницы скоро свяжется с вами.'}</p><a class="b" href="${U.pageUrl(ORIGIN, page.slug)}">${en ? 'Back to the page' : 'Вернуться на страницу'}</a>`);
+    res.type('html').send(s.html);
+  } catch (err) {
+    console.error('uzel/lead:', err);
+    res.status(500).type('text').send('Ошибка сервера');
+  }
+});
+
+router.get('/me/leads', needUser, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT l.id, l.name, l.contact, l.message, l.is_read, l.created_at FROM uzel_leads l JOIN uzel_pages p ON p.id = l.page_id
+        WHERE p.user_id = $1 ORDER BY l.created_at DESC LIMIT 300`, [req.uz.user.id]);
+    res.json({ leads: rows.map((r) => ({ id: Number(r.id), name: r.name, contact: r.contact, message: r.message, read: r.is_read, created_at: r.created_at })), unread: rows.filter((r) => !r.is_read).length });
+  } catch (err) {
+    res.status(500).json({ error: 'Не удалось загрузить заявки' });
+  }
+});
+router.post('/me/leads/read-all', needUser, async (req, res) => {
+  await pool.query('UPDATE uzel_leads SET is_read = true WHERE page_id IN (SELECT id FROM uzel_pages WHERE user_id = $1)', [req.uz.user.id]);
+  res.json({ ok: true });
+});
+router.post('/me/leads/:id/read', needUser, async (req, res) => {
+  const id = parseInt(req.params.id, 10) || 0;
+  await pool.query('UPDATE uzel_leads SET is_read = $3 WHERE id = $1 AND page_id IN (SELECT id FROM uzel_pages WHERE user_id = $2)', [id, req.uz.user.id, !(req.body && req.body.read === false)]);
+  res.json({ ok: true });
+});
+router.delete('/me/leads/:id', needUser, async (req, res) => {
+  const id = parseInt(req.params.id, 10) || 0;
+  await pool.query('DELETE FROM uzel_leads WHERE id = $1 AND page_id IN (SELECT id FROM uzel_pages WHERE user_id = $2)', [id, req.uz.user.id]);
+  res.json({ ok: true });
+});
+router.get('/me/leads.csv', needUser, async (req, res) => {
+  if (req.uz.user.plan === 'free') return res.status(402).json({ error: 'Выгрузка заявок доступна в Pro' });
+  const { rows } = await pool.query(
+    `SELECT l.created_at, l.name, l.contact, l.message FROM uzel_leads l JOIN uzel_pages p ON p.id = l.page_id WHERE p.user_id = $1 ORDER BY l.created_at DESC`, [req.uz.user.id]);
+  const q = (v) => '"' + String(v == null ? '' : v).replace(/"/g, '""').replace(/^([=+\-@])/, "'$1") + '"';
+  res.set({ 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="uzel-leads.csv"' });
+  res.send('\ufeff' + 'Дата;Имя;Контакт;Сообщение\n' + rows.map((r) => [new Date(r.created_at).toISOString(), r.name, r.contact, r.message].map(q).join(';')).join('\n'));
+});
+
+/* ---------- тариф и оплата (ЮKassa) ---------- */
+async function ykRequest(method, path, body, idem) {
+  const r = await fetch(YK_API + path, { method, headers: Object.assign({ Authorization: ykAuth(), 'Content-Type': 'application/json' }, idem ? { 'Idempotence-Key': idem } : {}), body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`ЮKassa ${r.status}: ${j.description || j.code || ''}`);
+  return j;
+}
+
+async function creditPayment(paymentId) {
+  const pay = await ykRequest('GET', `/payments/${encodeURIComponent(paymentId)}`);
+  if (pay.status !== 'succeeded' || !pay.paid) return { credited: false, status: pay.status };
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const row = await client.query('SELECT * FROM uzel_payments WHERE id = $1 FOR UPDATE', [paymentId]);
+    const rec = row.rows[0];
+    if (!rec) { await client.query('ROLLBACK'); return { credited: false, status: 'unknown' }; }
+    if (rec.status === 'succeeded') { await client.query('ROLLBACK'); return { credited: false, status: 'already' }; }
+    const plan = U.PLAN_PRICES[rec.plan_code];
+    if (!plan || Number(pay.amount && pay.amount.value) !== Number(plan.amount)) { await client.query('ROLLBACK'); return { credited: false, status: 'amount' }; }
+    await client.query("UPDATE uzel_payments SET status = 'succeeded', paid_at = now() WHERE id = $1", [paymentId]);
+    await client.query(
+      `UPDATE uzel_users SET plan = $3,
+         plan_until = GREATEST(COALESCE(plan_until, now()), now()) + ($2::int * interval '1 day') WHERE id = $1`, [rec.user_id, plan.days, plan.tier]);
+    await client.query('COMMIT');
+    return { credited: true, status: 'succeeded' };
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+router.post('/me/plan/checkout', needUser, limiter(60 * 60 * 1000, 20), async (req, res) => {
+  try {
+    const code = String((req.body && req.body.plan) || '');
+    const plan = U.PLAN_PRICES[code];
+    if (!plan) return res.status(400).json({ error: 'Неизвестный тариф' });
+    if (!ykOn()) return res.status(503).json({ error: 'Оплата подключается. Напишите на support@antviz.ru, включим Pro вручную.' });
+    const body = {
+      amount: { value: plan.amount, currency: 'RUB' }, capture: true, description: plan.title,
+      confirmation: { type: 'redirect', return_url: `${ORIGIN}${U.BASE}/app/plan?paid=1` },
+      metadata: { uzel_user: String(req.uz.user.id), plan: code },
+    };
+    const receipt = buildReceipt(req.uz.user.email, plan.title, plan.amount);
+    if (receipt) body.receipt = receipt;
+    const pay = await ykRequest('POST', '/payments', body, crypto.randomUUID());
+    await pool.query('INSERT INTO uzel_payments (id, user_id, plan_code, amount) VALUES ($1,$2,$3,$4)', [pay.id, req.uz.user.id, code, plan.amount]);
+    res.json({ ok: true, url: pay.confirmation && pay.confirmation.confirmation_url });
+  } catch (err) {
+    console.error('uzel/checkout:', err.message);
+    res.status(502).json({ error: 'Не удалось создать платёж. Попробуйте позже.' });
+  }
+});
+
+// Вызывается, когда человек вернулся после оплаты: проверяем платежи у ЮKassa сами, не дожидаясь уведомления
+router.post('/me/plan/check', needUser, limiter(60 * 1000, 20), async (req, res) => {
+  try {
+    if (!ykOn()) return res.json({ ok: true, pending: 0 });
+    const { rows } = await pool.query("SELECT id FROM uzel_payments WHERE user_id = $1 AND status = 'pending' AND created_at > now() - interval '2 days'", [req.uz.user.id]);
+    let credited = 0;
+    for (const r of rows) { const x = await creditPayment(r.id); if (x.credited) credited++; }
+    res.json({ ok: true, credited, pending: rows.length - credited });
+  } catch (err) {
+    console.error('uzel/plan/check:', err.message);
+    res.status(502).json({ error: 'Не удалось проверить оплату' });
+  }
+});
+
+// Уведомление от ЮKassa: телу не верим, статус платежа перепроверяем запросом к API
+router.post('/pay/webhook', async (req, res) => {
+  try {
+    const id = req.body && req.body.object && req.body.object.id;
+    if (req.body && req.body.event === 'payment.succeeded' && typeof id === 'string' && /^[\w-]{10,60}$/.test(id) && ykOn()) await creditPayment(id);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('uzel/pay/webhook:', err.message);
+    res.status(500).json({ ok: false });
+  }
+});
+
+
+router.post('/me/webhook/test', needUser, limiter(60 * 1000, 6, 'Слишком часто. Подождите минуту'), async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT slug, name, ext FROM uzel_pages WHERE user_id = $1', [req.uz.user.id]);
+    const page = rows[0], form = page && page.ext && page.ext.form;
+    if (!form || !form.webhook) return res.status(400).json({ error: 'Сначала сохраните адрес вебхука' });
+    if (req.uz.user.plan === 'free') return res.status(402).json({ error: 'Вебхук доступен в Pro' });
+    const code = await sendWebhook(form.webhook, form.secret || '', { event: 'test', page: { slug: page.slug, name: page.name, url: U.pageUrl(ORIGIN, page.slug) }, lead: { name: 'Тест', contact: 'test@example.com', message: 'Проверка вебхука', created_at: new Date().toISOString() } });
+    res.json({ ok: code < 400, status: code });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Не удалось отправить' });
+  }
+});
+router.get('/me/webhook', needUser, async (req, res) => {
+  const { rows } = await pool.query('SELECT ext FROM uzel_pages WHERE user_id = $1', [req.uz.user.id]);
+  const f = rows[0] && rows[0].ext && rows[0].ext.form;
+  res.json({ secret: f ? f.secret || '' : '' });
+});
+
+router.put('/me/settings', needUser, async (req, res) => {
+  try {
+    const digest = !!(req.body && req.body.digest);
+    await pool.query('UPDATE uzel_users SET digest = $2 WHERE id = $1', [req.uz.user.id, digest]);
+    res.json({ ok: true, digest });
+  } catch (err) {
+    res.status(500).json({ error: 'Не удалось сохранить' });
   }
 });
 

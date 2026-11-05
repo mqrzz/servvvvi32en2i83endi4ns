@@ -4,7 +4,25 @@ const icons = require('./uzel-icons');
 
 const THEMES = ['light', 'dark', 'blue', 'warm', 'mint', 'sunset', 'graphite', 'lilac'];
 const SHAPES = ['soft', 'round', 'square'];
-const RESERVED = new Set(['app', 'api', 'admin', 'assets', 'go', 'media', 'report', 'rules', 'privacy', 'login', 'logout', 'static', 'www', 'mail', 'help', 'support', 'antviz', 'uzel', 'about', 'terms', 'status', 'blog', 'robots', 'sitemap', 'favicon', 'index', 'dashboard', 'settings', 'me', 'null', 'undefined', 'test', 'root', 'system', 'security', 'billing', 'pay', 'official']);
+const FREE_THEMES = ['light', 'dark', 'blue', 'warm'];
+const LANGS = ['ru', 'en'];
+const LIMITS = {
+  free: { links: 10, themes: FREE_THEMES, statsDays: 14 },
+  pro: { links: 50, themes: THEMES, statsDays: 90 },
+  business: { links: 150, themes: THEMES, statsDays: 365 },
+};
+const PLAN_PRICES = {
+  pro_month: { tier: 'pro', amount: '199.00', days: 31, title: 'Узел Pro на месяц' },
+  pro_year: { tier: 'pro', amount: '1490.00', days: 366, title: 'Узел Pro на год' },
+  business_month: { tier: 'business', amount: '599.00', days: 31, title: 'Узел Бизнес на месяц' },
+  business_year: { tier: 'business', amount: '4990.00', days: 366, title: 'Узел Бизнес на год' },
+};
+// Путь страниц: /p/<имя>. Так остаётся место под другие разделы сайта.
+const PAGE_PREFIX = '/p';
+function planOf(u) {
+  return u && (u.plan === 'pro' || u.plan === 'business') && (!u.plan_until || new Date(u.plan_until).getTime() > Date.now()) ? u.plan : 'free';
+}
+const RESERVED = new Set(['p', 'en', 'pricing', 'examples', 'guides', 'plan', 'profile', 'links', 'design', 'stats', 'form', 'inbox', 'security', 'preview', 'start', 'more', 'lead', 'qr', 'sitemap', 'app', 'api', 'admin', 'assets', 'go', 'media', 'report', 'rules', 'privacy', 'login', 'logout', 'static', 'www', 'mail', 'help', 'support', 'antviz', 'uzel', 'about', 'terms', 'status', 'blog', 'robots', 'sitemap', 'favicon', 'index', 'dashboard', 'settings', 'me', 'null', 'undefined', 'test', 'root', 'system', 'security', 'billing', 'pay', 'official']);
 
 const CREATE_SQL = `
 CREATE TABLE IF NOT EXISTS uzel_users (
@@ -54,6 +72,30 @@ CREATE TABLE IF NOT EXISTS uzel_pages (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE uzel_pages ADD COLUMN IF NOT EXISTS ext JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE uzel_users ADD COLUMN IF NOT EXISTS plan TEXT NOT NULL DEFAULT 'free';
+ALTER TABLE uzel_users ADD COLUMN IF NOT EXISTS plan_until TIMESTAMPTZ;
+ALTER TABLE uzel_users ADD COLUMN IF NOT EXISTS digest BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE uzel_users ADD COLUMN IF NOT EXISTS digest_sent_at TIMESTAMPTZ;
+CREATE TABLE IF NOT EXISTS uzel_leads (
+    id         BIGSERIAL PRIMARY KEY,
+    page_id    BIGINT NOT NULL REFERENCES uzel_pages(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL DEFAULT '',
+    contact    TEXT NOT NULL,
+    message    TEXT NOT NULL DEFAULT '',
+    ip         TEXT,
+    is_read    BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_uzel_leads_page ON uzel_leads(page_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS uzel_payments (
+    id         TEXT PRIMARY KEY,
+    user_id    BIGINT NOT NULL REFERENCES uzel_users(id) ON DELETE CASCADE,
+    plan_code  TEXT NOT NULL,
+    amount     TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'pending',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    paid_at    TIMESTAMPTZ
+);
 CREATE TABLE IF NOT EXISTS uzel_events (
     id      BIGSERIAL PRIMARY KEY,
     page_id BIGINT NOT NULL REFERENCES uzel_pages(id) ON DELETE CASCADE,
@@ -159,7 +201,10 @@ function newId() {
   return crypto.randomBytes(4).toString('hex');
 }
 
-function validatePage(input, existing) {
+function validatePage(input, existing, plan) {
+  plan = plan === 'pro' || plan === 'business' ? plan : 'free';
+  const paid = plan !== 'free';
+  const lim = LIMITS[plan];
   const errors = [];
   const out = {};
   const name = cleanText(input.name, 60);
@@ -167,7 +212,11 @@ function validatePage(input, existing) {
   out.name = name;
   out.subtitle = cleanText(input.subtitle, 80);
   out.bio = cleanText(input.bio, 300);
-  out.theme = THEMES.includes(input.theme) ? input.theme : (existing ? existing.theme : 'light');
+  const wantTheme = THEMES.includes(input.theme) ? input.theme : (existing ? existing.theme : 'light');
+  if (!lim.themes.includes(wantTheme) && !(existing && existing.theme === wantTheme)) {
+    errors.push('Эта тема доступна в Pro');
+    out.theme = existing && lim.themes.includes(existing.theme) ? existing.theme : 'light';
+  } else out.theme = wantTheme;
   out.published = input.published === false ? false : true;
   const oldExt = (existing && existing.ext) || {};
   const shape = SHAPES.includes(input.shape) ? input.shape : (oldExt.shape || 'soft');
@@ -179,7 +228,26 @@ function validatePage(input, existing) {
   if (em) { if (/^[^\s@<>]{1,64}@[^\s@<>]{1,190}\.[A-Za-z]{2,}$/.test(em) && em.length <= 254) info.email = em; else errors.push('Проверьте почту в контактах'); }
   const ad = cleanText(ii.address, 120);
   if (ad) info.address = ad;
-  out.ext = { shape, info };
+  const lang = LANGS.includes(input.lang) ? input.lang : (oldExt.lang || 'ru');
+  const fi = input.form && typeof input.form === 'object' ? input.form : (oldExt.form || {});
+  let hook = fi.webhook === undefined ? (oldExt.form && oldExt.form.webhook) || '' : String(fi.webhook || '').trim();
+  if (hook) {
+    let u = null; try { u = new URL(hook); } catch (e) { /* ниже */ }
+    if (!u || u.protocol !== 'https:' || u.port || u.username || u.password || hook.length > 300) { errors.push('Вебхук: нужен адрес вида https://… без порта и логина'); hook = (oldExt.form && oldExt.form.webhook) || ''; }
+    else if (!paid && hook !== ((oldExt.form && oldExt.form.webhook) || '')) { errors.push('Вебхук доступен в Pro'); hook = (oldExt.form && oldExt.form.webhook) || ''; }
+  }
+  const secret = (oldExt.form && oldExt.form.secret) || require('crypto').randomBytes(18).toString('hex');
+  const form = { webhook: hook, secret, enabled: !!fi.enabled, title: cleanText(fi.title, 60) || (lang === 'en' ? 'Leave a request' : 'Оставить заявку'), button: cleanText(fi.button, 30) || (lang === 'en' ? 'Send' : 'Отправить'), notify: fi.notify !== false };
+  const hideBadge = input.hideBadge === undefined ? !!oldExt.hideBadge : !!input.hideBadge;
+  if (hideBadge && !paid && !oldExt.hideBadge) errors.push('Скрыть значок можно в Pro');
+  const inAcc = input.accent === undefined ? undefined : String(input.accent || '').trim().toLowerCase();
+  let accent = oldExt.accent || '';
+  if (inAcc !== undefined && inAcc !== accent) {
+    if (inAcc && !/^#[0-9a-f]{6}$/.test(inAcc)) errors.push('Цвет нужен в формате #0066ff');
+    else if (inAcc && plan !== 'business') errors.push('Свой цвет кнопок доступен в тарифе Бизнес');
+    else accent = inAcc;
+  }
+  out.ext = { shape, info, lang, form, hideBadge: hideBadge && (paid || !!oldExt.hideBadge), accent };
 
   const socials = [];
   const seen = new Set();
@@ -194,7 +262,10 @@ function validatePage(input, existing) {
 
   const links = [];
   const ids = new Set();
-  for (const l of Array.isArray(input.links) ? input.links.slice(0, 20) : []) {
+  const rawLinks = Array.isArray(input.links) ? input.links.filter(Boolean) : [];
+  const prevCount = existing && Array.isArray(existing.links) ? existing.links.length : 0;
+  if (rawLinks.length > lim.links && rawLinks.length > prevCount) errors.push(plan === 'free' ? `На бесплатном тарифе до ${lim.links} ссылок, в Pro до ${LIMITS.pro.links}` : plan === 'pro' ? `В Pro до ${lim.links} ссылок, в Бизнес до ${LIMITS.business.links}` : `Не больше ${lim.links} ссылок`);
+  for (const l of rawLinks.slice(0, LIMITS.business.links)) {
     if (!l) continue;
     const title = cleanText(l.title, 60);
     const raw = String(l.url || '').trim();
@@ -211,7 +282,18 @@ function validatePage(input, existing) {
     let id = /^[a-f0-9]{8}$/.test(String(l.id || '')) && !ids.has(l.id) ? l.id : newId();
     ids.add(id);
     const desc = cleanText(l.desc, 80);
-    links.push(Object.assign({ id, title, url, enabled: l.enabled !== false }, desc ? { desc } : {}));
+    const sched = {};
+    for (const k of ['from', 'to']) {
+      if (l[k]) {
+        const t = Date.parse(l[k]);
+        if (Number.isNaN(t)) { errors.push(`Проверьте дату у ссылки «${title}»`); continue; }
+        const iso = new Date(t).toISOString();
+        const prev = existing && Array.isArray(existing.links) ? existing.links.find((x) => x.id === l.id) : null;
+        if (!paid && !(prev && prev[k] === iso)) { errors.push('Показ по расписанию доступен в Pro'); continue; }
+        sched[k] = iso;
+      }
+    }
+    links.push(Object.assign({ id, title, url, enabled: l.enabled !== false }, desc ? { desc } : {}, sched));
   }
   out.links = links;
 
@@ -270,36 +352,62 @@ h1{font:800 clamp(26px,6vw,32px)/1.1 Unbounded,"Golos Text",sans-serif;letter-sp
 .t-lilac{background:#ece6ff;color:#1d1236}.t-lilac .lk a,.t-lilac .soc a,.t-lilac .ct a{background:#faf8ff}
 .t-light .ct a{background:#fff;box-shadow:0 2px 0 #0b0b0d0d}.t-dark .ct a{background:#1e1b1d}.t-blue .ct a{background:#ffffff26}.t-warm .ct a{background:#fff7ef}
 .ct{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin-top:18px}.ct a{display:flex;align-items:center;gap:8px;height:44px;padding:0 16px;border-radius:999px;color:inherit;text-decoration:none;font-weight:700;font-size:15px}.ct svg{width:18px;height:18px}
+h1,.sub,.bio,.lk span{overflow-wrap:anywhere;word-break:break-word;min-width:0}.bio{max-width:100%;white-space:pre-line}
 .lk small{display:block;font-weight:500;font-size:13px;opacity:.7;margin-top:2px;white-space:normal}
 .lk .hd{font:800 13px Unbounded,"Golos Text",sans-serif;letter-spacing:.02em;text-transform:uppercase;opacity:.6;margin:14px 0 -2px;text-align:left}
+.fm{width:100%;display:flex;flex-direction:column;gap:10px;margin-top:22px;text-align:left}.fm input,.fm textarea{width:100%;border:0;border-radius:16px;padding:14px 16px;font:600 16px "Golos Text",system-ui,sans-serif;color:inherit;background:#0b0b0d12;outline:2px solid transparent}.fm textarea{resize:vertical;min-height:84px;max-height:200px}.fm input::placeholder,.fm textarea::placeholder{color:inherit;opacity:.55}.fm input:focus,.fm textarea:focus{outline-color:currentColor}.fm button{height:54px;border:0;border-radius:18px;font:800 16px "Golos Text",system-ui,sans-serif;cursor:pointer;background:#0b0b0d;color:#fff}.t-dark .fm button,.t-graphite .fm button,.t-blue .fm button,.t-sunset .fm button{background:#fff;color:#0b0b0d}.fm .hp{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}
+.t-dark .fm input,.t-dark .fm textarea,.t-blue .fm input,.t-blue .fm textarea,.t-sunset .fm input,.t-sunset .fm textarea,.t-graphite .fm input,.t-graphite .fm textarea{background:#ffffff1f}
+.ac .lk a,.ac .ct a{background:var(--ac)!important;color:var(--act)!important;box-shadow:none!important}.ac .fm button{background:var(--ac)!important;color:var(--act)!important}
 .s-round .lk a{border-radius:999px}.s-square .lk a{border-radius:6px}.s-square .soc a{border-radius:8px}
 `;
 
-function renderPublicPage(page, origin) {
+const L10N = {
+  ru: { call: 'Позвонить', mail: 'Написать', route: 'Как добраться', made: 'Сделано на Узле', report: 'Пожаловаться', name: 'Ваше имя', contact: 'Телефон или почта', msg: 'Сообщение (необязательно)', pageOf: (n) => `Страница ${n} на Узле` },
+  en: { call: 'Call', mail: 'Email', route: 'Directions', made: 'Made with Uzel', report: 'Report', name: 'Your name', contact: 'Phone or email', msg: 'Message (optional)', pageOf: (n) => `${n} on Uzel` },
+};
+const pageUrl = (origin, slug) => `${origin}${BASE}${PAGE_PREFIX}/${slug}`;
+const linkLive = (l, now) => (!l.from || Date.parse(l.from) <= now) && (!l.to || Date.parse(l.to) > now);
+
+function renderPublicPage(page, origin, opts) {
+  opts = opts || {};
+  const ext = page.ext || {};
+  const L = L10N[ext.lang] || L10N.ru;
   const t = THEMES.includes(page.theme) ? page.theme : 'light';
+  const plan = opts.plan || 'free';
+  const now = Date.now();
+  const go = (id) => (opts.preview ? '#' : `/api/uzel/go/${esc(page.slug)}/${id}`);
   const avatar = page.avatar
     ? `<img src="/api/uzel/media/${esc(page.avatar)}" alt="" width="112" height="112">`
     : esc(initials(page.name));
-  const soc = (page.socials || []).filter((s) => icons.brands[s.type]).map((s) => `<a href="/api/uzel/go/${esc(page.slug)}/s-${esc(s.type)}" rel="nofollow noopener ugc" aria-label="${esc(SOCIALS[s.type] ? SOCIALS[s.type].label : s.type)}">${brandSvg(s.type)}</a>`).join('');
-  const links = (page.links || []).filter((l) => l.enabled !== false).map((l) => l.kind === 'header' ? `<h2 class="hd">${esc(l.title)}</h2>` : `<a href="/api/uzel/go/${esc(page.slug)}/${esc(l.id)}" rel="nofollow noopener ugc">${lucideSvg('link')}<span>${esc(l.title)}${l.desc ? `<small>${esc(l.desc)}</small>` : ''}</span>${lucideSvg('arrow-up-right').replace('<svg', '<svg class="ar"')}</a>`).join('');
-  const info = (page.ext && page.ext.info) || {};
-  const infoBtns = [info.phone ? ['i-phone', 'phone', 'Позвонить'] : null, info.email ? ['i-email', 'mail', 'Написать'] : null, info.address ? ['i-map', 'map-pin', 'Как добраться'] : null].filter(Boolean)
-    .map(([id, ic, t]) => `<a href="/api/uzel/go/${esc(page.slug)}/${id}" rel="nofollow noopener ugc">${lucideSvg(ic)}<span>${t}</span></a>`).join('');
-  const shape = (page.ext && page.ext.shape) || 'soft';
-  const music = page.music ? `<a href="/api/uzel/go/${esc(page.slug)}/music" rel="nofollow noopener ugc">${lucideSvg('music')}<span>${esc(page.music.title)}</span>${lucideSvg('arrow-up-right').replace('<svg', '<svg class="ar"')}</a>` : '';
-  const desc = esc(page.bio || page.subtitle || `Страница ${page.name} на Узле`);
+  const soc = (page.socials || []).filter((s) => icons.brands[s.type]).map((s) => `<a href="${go('s-' + esc(s.type))}" rel="nofollow noopener ugc" aria-label="${esc(SOCIALS[s.type] ? SOCIALS[s.type].label : s.type)}">${brandSvg(s.type)}</a>`).join('');
+  const arrow = lucideSvg('arrow-up-right').replace('<svg', '<svg class="ar"');
+  const links = (page.links || []).filter((l) => l.enabled !== false && (plan === 'free' || linkLive(l, now))).map((l) => l.kind === 'header' ? `<h2 class="hd">${esc(l.title)}</h2>` : `<a href="${go(esc(l.id))}" rel="nofollow noopener ugc">${lucideSvg('link')}<span>${esc(l.title)}${l.desc ? `<small>${esc(l.desc)}</small>` : ''}</span>${arrow}</a>`).join('');
+  const info = ext.info || {};
+  const infoBtns = [info.phone ? ['i-phone', 'phone', L.call] : null, info.email ? ['i-email', 'mail', L.mail] : null, info.address ? ['i-map', 'map-pin', L.route] : null].filter(Boolean)
+    .map(([id, ic, tx]) => `<a href="${go(id)}" rel="nofollow noopener ugc">${lucideSvg(ic)}<span>${tx}</span></a>`).join('');
+  const shape = ext.shape || 'soft';
+  const music = page.music ? `<a href="${go('music')}" rel="nofollow noopener ugc">${lucideSvg('music')}<span>${esc(page.music.title)}</span>${arrow}</a>` : '';
+  const f = ext.form || {};
+  const form = f.enabled ? `<form class="fm" method="post" action="${opts.preview ? '#' : '/api/uzel/lead/' + esc(page.slug)}" ${opts.preview ? 'onsubmit="return false"' : ''}><h2 class="hd" style="margin:0 0 4px">${esc(f.title)}</h2><input name="name" maxlength="60" placeholder="${L.name}" autocomplete="name"><input name="contact" maxlength="120" required placeholder="${L.contact}" autocomplete="tel"><textarea name="message" maxlength="600" rows="3" placeholder="${L.msg}"></textarea><input class="hp" type="text" name="website" tabindex="-1" autocomplete="off" aria-hidden="true"><button type="submit">${esc(f.button)}</button></form>` : '';
+  const desc = esc(page.bio || page.subtitle || L.pageOf(page.name));
   const img = page.avatar ? `<meta property="og:image" content="${esc(origin)}/api/uzel/media/${esc(page.avatar)}">` : '';
-  return `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  let accentCss = '';
+  if (plan === 'business' && /^#[0-9a-f]{6}$/.test(ext.accent || '')) {
+    const n = parseInt(ext.accent.slice(1), 16), lum = (0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
+    accentCss = `--ac:${ext.accent};--act:${lum > 0.62 ? '#0b0b0d' : '#ffffff'}`;
+  }
+  const badge = ext.hideBadge && plan !== 'free' ? '' : `<a href="${esc(origin)}${BASE}/">${L.made}</a>`;
+  return `<!doctype html><html lang="${ext.lang === 'en' ? 'en' : 'ru'}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(page.name)} · Узел</title><meta name="description" content="${desc}"><meta name="robots" content="noindex,nofollow">
 <meta property="og:title" content="${esc(page.name)}"><meta property="og:description" content="${desc}"><meta property="og:type" content="profile">${img}
 <meta name="theme-color" content="${({ dark: '#0b0b0d', blue: '#0055e0', warm: '#ffe9d6', mint: '#dff5e8', sunset: '#c2255c', graphite: '#26272b', lilac: '#ece6ff' })[t] || '#f2f2f4'}">
 <link rel="icon" href="${BASE}/assets/favicon.svg" type="image/svg+xml"><style>${PAGE_CSS}</style></head>
-<body class="t-${t} s-${shape}"><main class="w"><div class="av" style="background:${gradient(page.name)}">${avatar}</div><h1>${esc(page.name)}</h1>${page.subtitle ? `<p class="sub">${esc(page.subtitle)}</p>` : ''}${page.bio ? `<p class="bio">${esc(page.bio)}</p>` : ''}${soc ? `<div class="soc">${soc}</div>` : ''}${infoBtns ? `<div class="ct">${infoBtns}</div>` : ''}<div class="lk">${links}${music}</div>
-<div class="ft"><a href="${esc(origin)}${BASE}/">Сделано на Узле</a><a href="/api/uzel/report/${esc(page.slug)}">Пожаловаться</a></div></main></body></html>`;
+<body class="t-${t} s-${shape}${accentCss ? ' ac' : ''}"${accentCss ? ` style="${accentCss}"` : ''}><main class="w"><div class="av" style="background:${gradient(page.name)}">${avatar}</div><h1>${esc(page.name)}</h1>${page.subtitle ? `<p class="sub">${esc(page.subtitle)}</p>` : ''}${page.bio ? `<p class="bio">${esc(page.bio)}</p>` : ''}${soc ? `<div class="soc">${soc}</div>` : ''}${infoBtns ? `<div class="ct">${infoBtns}</div>` : ''}<div class="lk">${links}${music}</div>${form}
+<div class="ft">${badge}<a href="${opts.preview ? '#' : '/api/uzel/report/' + esc(page.slug)}">${L.report}</a></div></main></body></html>`;
 }
 
 function simplePage(title, body, status) {
   return { status: status || 200, html: `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${esc(title)} · Узел</title><style>${PAGE_CSS}.card{background:#fff;border-radius:28px;padding:30px;box-shadow:0 0 0 1px #0b0b0d1a;text-align:left;width:100%}.card h1{font-size:26px;margin:0 0 12px}.card p{margin:0 0 14px;color:#4a474b}.card select,.card textarea{width:100%;border:0;background:#f2f2f4;border-radius:16px;padding:14px 16px;font:inherit;margin-bottom:12px}.card button,.card .b{display:inline-flex;align-items:center;height:52px;padding:0 24px;border-radius:16px;border:0;background:#06f;color:#fff;font:700 17px inherit;text-decoration:none;cursor:pointer}</style></head><body class="t-light"><main class="w"><div class="card">${body}</div></main></body></html>` };
 }
 
-module.exports = { SHAPES, BASE, ensureUzelTables, cleanupUzel, THEMES, RESERVED, SOCIALS, cleanText, validateSlug, normalizeUrl, normalizeSocial, validatePage, newId, renderPublicPage, simplePage, esc };
+module.exports = { LIMITS, FREE_THEMES, LANGS, PLAN_PRICES, PAGE_PREFIX, planOf, pageUrl, SHAPES, BASE, ensureUzelTables, cleanupUzel, THEMES, RESERVED, SOCIALS, cleanText, validateSlug, normalizeUrl, normalizeSocial, validatePage, newId, renderPublicPage, simplePage, esc };
