@@ -41,6 +41,8 @@ const { ensureConsentTable } = require('./utils/consent');
 const { ensureStatusSubscriberColumns } = require('./lib/statusNotify');
 const { ensureAnalyticsTables, cleanupOldEvents } = require('./utils/analytics');
 const { ensureUzelTables, cleanupUzel } = require('./utils/uzel');
+const { ensureSiteTables } = require('./lib/siteTables');
+const sitePublicRoutes = require('./routes/site-public');
 const uzelRoutes = require('./routes/uzel');
 const trackRoutes = require('./routes/track');
 const analyticsAdminRoutes = require('./routes/analytics-admin');
@@ -98,6 +100,7 @@ app.use('/api/inbound-email', inboundEmailRoutes);
 app.use('/api/email-templates', emailTemplatesRoutes);
 app.use('/api/track', trackRoutes);
 app.use('/api/uzel', uzelRoutes);
+app.use('/api/site', sitePublicRoutes);
 app.use('/api/admin-stats', analyticsAdminRoutes);
 
 app.use((err, req, res, next) => {
@@ -110,6 +113,7 @@ ensureConsentTable();
 ensureStatusSubscriberColumns();
 ensureAnalyticsTables().then(() => cleanupOldEvents());
 ensureUzelTables().then(() => cleanupUzel());
+ensureSiteTables();
 require('./utils/uzel-digest').scheduleDigests();
 setInterval(() => { cleanupOldEvents(); cleanupUzel(); }, 24 * 60 * 60 * 1000);
 

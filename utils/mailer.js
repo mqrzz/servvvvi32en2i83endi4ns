@@ -13,7 +13,16 @@ const transporter = nodemailer.createTransport({
     : {}),
 });
 
+// Для тестов: письма не уходят в SMTP, а дописываются в файл (по одной JSON-строке)
+if (process.env.MAIL_CAPTURE_FILE) {
+  transporter.sendMail = async (m) => {
+    require('fs').appendFileSync(process.env.MAIL_CAPTURE_FILE, JSON.stringify({ to: m.to, subject: m.subject, html: m.html, headers: m.headers }) + '\n');
+    return { messageId: 'captured' };
+  };
+}
+
 const IMG_DIR = path.join(__dirname, '..', 'img');
+const SENT_WITH_FILE = 'geserd-sent-with-light.gif';
 
 const LOGO_FILE = 'logo-white.png';
 const SOCIAL_LINKS = [
@@ -57,17 +66,18 @@ const FONT = "-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif"
 const DISPLAY = "'Arial Black','Segoe UI',Arial,sans-serif";
 
 // Общий каркас всех писем: синяя шапка с логотипом и заголовком, белая карточка с содержимым, спокойный подвал
-function emailLayout({ brand, heading, lead, bodyHtml, footerHtml, preheader, logoCid, brandName, heroBg }) {
+function emailLayout({ brand, heading, lead, bodyHtml, footerHtml, preheader, logoCid, brandName, art }) {
   const hero = `
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="#0066ff" ${heroBg ? `background="cid:${heroBg}"` : ''} style="background:#0066ff;background-image:${heroBg ? `url(cid:${heroBg}),` : ''}linear-gradient(150deg,#3d8bff 0%,#0066ff 55%,#0047c2 100%);${heroBg ? 'background-size:cover;background-position:right center;' : ''}border-radius:28px;">
-    <tr><td style="padding:26px 28px 30px;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="#0066ff" style="background:#0066ff;background-image:linear-gradient(150deg,#3d8bff 0%,#0066ff 55%,#0047c2 100%);border-radius:32px;">
+    <tr><td style="padding:28px 30px 0;">
       <table role="presentation" cellpadding="0" cellspacing="0"><tr>
-        <td style="vertical-align:middle;"><img src="cid:${logoCid}" width="30" height="30" alt="" style="display:block;width:30px;height:30px;"></td>
-        <td style="vertical-align:middle;padding-left:10px;font-family:${DISPLAY};font-size:21px;font-weight:900;letter-spacing:-.5px;color:#ffffff;">${brandName}</td>
+        <td style="vertical-align:middle;"><img src="cid:${logoCid}" width="32" height="32" alt="" style="display:block;width:32px;height:32px;"></td>
+        <td style="vertical-align:middle;padding-left:10px;font-family:${DISPLAY};font-size:22px;font-weight:900;letter-spacing:-.5px;color:#ffffff;">${brandName}</td>
       </tr></table>
-      <h1 style="margin:26px 0 0;${heroBg ? 'max-width:300px;' : ''}font-family:${DISPLAY};font-size:30px;line-height:1.12;font-weight:900;letter-spacing:-1px;color:#ffffff;">${heading}</h1>
-      ${lead ? `<p style="margin:12px 0 0;${heroBg ? 'max-width:300px;' : ''}font-family:${FONT};font-size:16px;line-height:1.5;color:#dce9ff;">${lead}</p>` : ''}
+      <h1 style="margin:30px 0 0;font-family:${DISPLAY};font-size:36px;line-height:1.08;font-weight:900;letter-spacing:-1.4px;color:#ffffff;">${heading}</h1>
+      ${lead ? `<p style="margin:14px 0 0;font-family:${FONT};font-size:17px;line-height:1.5;color:#dce9ff;">${lead}</p>` : ''}
     </td></tr>
+    ${art ? `<tr><td style="padding:30px 30px 0;"><img src="cid:${art}" width="100%" alt="" style="display:block;width:100%;height:auto;border:0;"></td></tr>` : '<tr><td style="height:32px;line-height:32px;font-size:0;">&nbsp;</td></tr>'}
   </table>`;
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>${esc(String(heading).replace(/<[^>]+>/g, ''))}</title></head>
 <body style="margin:0;padding:0;background:#eaf1ff;">
@@ -78,19 +88,20 @@ function emailLayout({ brand, heading, lead, bodyHtml, footerHtml, preheader, lo
     <tr><td style="height:12px;line-height:12px;font-size:0;">&nbsp;</td></tr>
     <tr><td style="background:#ffffff;border-radius:28px;padding:28px;font-family:${FONT};font-size:16px;line-height:1.55;color:#2b2b30;">${bodyHtml}</td></tr>
     <tr><td align="center" style="padding:22px 10px 0;font-family:${FONT};font-size:12px;line-height:1.6;color:#7b8294;">${footerHtml}</td></tr>
+    <tr><td align="center" style="padding:26px 0 4px;"><a href="https://geserd.com" target="_blank" style="text-decoration:none;"><img src="cid:${cidFor(SENT_WITH_FILE)}" width="180" height="66" alt="Sent with Geserd" style="display:block;border:0;width:180px;height:66px;margin:0 auto;"></a></td></tr>
   </table>
 </td></tr></table></body></html>`;
 }
 
 function wrapEmail({ heading, bodyHtml, footerNote }) {
   return emailLayout({
-    brandName: 'antviz', logoCid: cidFor(LOGO_FILE), heading, bodyHtml,
+    brandName: 'antviz', logoCid: cidFor(LOGO_FILE), art: 'antviz-art', heading, bodyHtml,
     footerHtml: `${socialRow()}<div style="margin-top:14px;font-size:13px;font-weight:600;color:#191b1e;">@antviz_official</div><div style="margin-top:4px;">Москва, Россия</div><div style="margin-top:12px;">${footerNote || 'Antviz &middot; antviz.ru'}</div><div style="margin-top:10px;font-size:10.5px;color:#9aa1b2;max-width:420px;">*Meta Platforms Inc. (включая Instagram и Threads) признана экстремистской организацией, её деятельность запрещена на территории РФ.</div>`,
   });
 }
 
 function digitsBlock(code) {
-  const cells = String(code).split('').map((d) => `<td align="center" width="16%" style="padding:0 3px;"><div style="background:#f0f4ff;border-radius:16px;padding:16px 0;font-family:${DISPLAY};font-size:30px;font-weight:900;color:#0b0b0d;">${d}</div></td>`).join('');
+  const cells = String(code).split('').map((d) => `<td align="center" width="16%" style="padding:0 3px;"><div style="background:#f4f7ff;border:2px solid #d9e6ff;border-radius:18px;padding:18px 0;font-family:${DISPLAY};font-size:34px;font-weight:900;color:#0b0b0d;">${d}</div></td>`).join('');
   return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:6px 0 4px;"><tr>${cells}</tr></table>`;
 }
 
@@ -106,8 +117,8 @@ function button(text, url) {
 /* ---------- письма «Узла» ---------- */
 function uzelFooter(lang) {
   return lang === 'en'
-    ? 'Uzel is a service by <a href="https://antviz.ru" style="color:#5b6a8f;text-decoration:underline;">Antviz</a><br>You got this email because someone entered your address on Uzel.'
-    : 'Узел — сервис <a href="https://antviz.ru" style="color:#5b6a8f;text-decoration:underline;">Antviz</a><br>Вы получили письмо, потому что ваш адрес указали на сайте Узла.';
+    ? 'Uzel is a service by <a href="https://geserd.com" style="color:#5b6a8f;text-decoration:underline;">Geserd</a><br>You got this email because someone entered your address on Uzel.'
+    : 'Узел — сервис <a href="https://geserd.com" style="color:#5b6a8f;text-decoration:underline;">Geserd</a><br>Вы получили письмо, потому что ваш адрес указали на сайте Узла.';
 }
 
 function uzelCodeEmail({ code, lang }) {
@@ -119,9 +130,9 @@ function uzelCodeEmail({ code, lang }) {
     <p style="margin:18px 0 0;font-size:14px;line-height:1.55;color:#6b7284;">${t.note}</p>`;
   return {
     subject: t.subject,
-    html: emailLayout({ brandName: 'узел', logoCid: 'uzel-mark', heroBg: 'uzel-hero', heading: t.h, lead: t.lead, bodyHtml: body, footerHtml: uzelFooter(lang).replace(/namespace/g, 'a8'), preheader: t.pre }),
+    html: emailLayout({ brandName: 'узел', logoCid: 'uzel-mark', art: 'uzel-art', heading: t.h, lead: t.lead, bodyHtml: body, footerHtml: uzelFooter(lang).replace(/namespace/g, 'a8'), preheader: t.pre }),
     text: `${t.h}: ${code}\n\n${t.note}`,
-    attachments: [imageAttachment('uzel-mark.png'), imageAttachment('uzel-hero.png')],
+    attachments: [imageAttachment('uzel-mark.png'), imageAttachment('uzel-art.png')],
   };
 }
 
@@ -137,9 +148,9 @@ function uzelDigestEmail({ name, views, clicks, leads, top, link, lang }) {
     + `<div style="margin-top:22px;">${button(T.btn, link)}</div><p style="margin:18px 0 0;font-size:13px;color:#7b8294;">${T.off}</p>`;
   return {
     subject: T.subject,
-    html: emailLayout({ brandName: en ? 'uzel' : 'узел', logoCid: 'uzel-mark', heroBg: 'uzel-hero', heading: T.h, lead: T.lead, bodyHtml: body, footerHtml: uzelFooter(lang).replace(/namespace/g, 'a8'), preheader: `${nf(views)} / ${nf(clicks)} / ${nf(leads)}` }),
+    html: emailLayout({ brandName: en ? 'uzel' : 'узел', logoCid: 'uzel-mark', art: 'uzel-art', heading: T.h, lead: T.lead, bodyHtml: body, footerHtml: uzelFooter(lang).replace(/namespace/g, 'a8'), preheader: `${nf(views)} / ${nf(clicks)} / ${nf(leads)}` }),
     text: `${T.h}\n${T.v}: ${views}\n${T.c}: ${clicks}\n${T.l}: ${leads}\n${link}`,
-    attachments: [imageAttachment('uzel-mark.png'), imageAttachment('uzel-hero.png')],
+    attachments: [imageAttachment('uzel-mark.png'), imageAttachment('uzel-art.png')],
   };
 }
 
@@ -149,9 +160,9 @@ function uzelLeadEmail({ page, name, contact, message, link }) {
     <div style="margin-top:20px;">${button('Открыть заявки', link)}</div>`;
   return {
     subject: `Новая заявка на странице «${page}»`.slice(0, 150),
-    html: emailLayout({ brandName: 'узел', logoCid: 'uzel-mark', heroBg: 'uzel-hero', heading: 'Новая заявка', lead: `Кто-то оставил заявку на вашей странице «${esc(page)}».`, bodyHtml: body, footerHtml: uzelFooter('ru').replace(/namespace/g, 'a8') + '<br>Уведомления можно отключить на вкладке «Заявки».', preheader: `${name || 'Посетитель'}: ${contact}` }),
+    html: emailLayout({ brandName: 'узел', logoCid: 'uzel-mark', art: 'uzel-art', heading: 'Новая заявка', lead: `Кто-то оставил заявку на вашей странице «${esc(page)}».`, bodyHtml: body, footerHtml: uzelFooter('ru').replace(/namespace/g, 'a8') + '<br>Уведомления можно отключить на вкладке «Заявки».', preheader: `${name || 'Посетитель'}: ${contact}` }),
     text: `Новая заявка на странице «${page}»\nИмя: ${name || '—'}\nКонтакт: ${contact}\n${message ? 'Сообщение: ' + message + '\n' : ''}\n${link}`,
-    attachments: [imageAttachment('uzel-mark.png'), imageAttachment('uzel-hero.png')],
+    attachments: [imageAttachment('uzel-mark.png'), imageAttachment('uzel-art.png')],
   };
 }
 
@@ -275,7 +286,63 @@ async function sendNotificationEmail(toEmail, { title, text, buttonText, buttonU
   });
 }
 
+
+
+async function sendSiteRequestAdminEmail({ id, name, contact, message, services, page }) {
+  const to = process.env.ADMIN_NOTIFY_EMAIL || process.env.MAIL_FROM;
+  if (!to) return;
+  const row = (l, v) => `<tr><td style="padding:6px 14px 6px 0;color:#6e6a70;vertical-align:top;white-space:nowrap">${l}</td><td style="padding:6px 0;font-weight:600">${v}</td></tr>`;
+  const html = wrapEmail({
+    heading: 'Новая заявка с сайта',
+    bodyHtml: `<table style="border-collapse:collapse;font-size:15px">${row('Имя', escHtml(name))}${row('Контакт', escHtml(contact))}${services.length ? row('Что нужно', escHtml(services.join(', '))) : ''}${page ? row('Страница', escHtml(page)) : ''}</table>
+      <p style="margin:16px 0 0;white-space:pre-wrap">${escHtml(message)}</p>${button('Открыть в админке', 'https://antviz.ru/admin/requests')}`,
+    footerNote: `Заявка №${id} · antviz.ru`,
+  });
+  await transporter.sendMail({ from: process.env.MAIL_FROM, to, subject: `Заявка с сайта: ${String(name).slice(0, 40)}`, html, attachments: baseAttachments() });
+}
+
+async function sendBlogConfirmEmail(toEmail, confirmUrl, unsubscribeUrl) {
+  const html = wrapEmail({
+    heading: 'Подтвердите подписку на блог',
+    bodyHtml: `<p>Этот адрес указали для подписки на блог Antviz: письмо придёт, когда выйдет новая статья.</p>
+      <p style="margin-top:12px;">Если это были не вы, просто проигнорируйте письмо: без подтверждения ничего не придёт, адрес удалится через 3 суток.</p>${button('Подтвердить подписку', confirmUrl)}`,
+    footerNote: `Antviz &middot; antviz.ru<br/><a href="${unsubscribeUrl}" style="color:#9a9a9e;">Не подписывался(-ась), удалить адрес</a>`,
+  });
+  await transporter.sendMail({ from: process.env.MAIL_FROM, to: toEmail, subject: 'Подтвердите подписку на блог Antviz', html, attachments: baseAttachments() });
+}
+
+async function sendBlogPostEmail(toEmail, { title, excerpt, url, unsubscribeUrl }) {
+  const html = wrapEmail({
+    heading: title,
+    bodyHtml: `${excerpt ? `<p>${escHtml(excerpt)}</p>` : ''}${button('Читать статью', url)}`,
+    footerNote: `Antviz &middot; antviz.ru<br/><a href="${unsubscribeUrl}" style="color:#9a9a9e;">Отписаться от рассылки</a>`,
+  });
+  await transporter.sendMail({ from: process.env.MAIL_FROM, to: toEmail, subject: String(title).slice(0, 150), html, attachments: baseAttachments(),
+    headers: { 'List-Unsubscribe': `<${unsubscribeUrl}>` } });
+}
+
+
+// Плашка «Sent with Geserd» стоит в конце каждого письма: гарантируем, что картинка приложена, откуда бы письмо ни отправлялось
+const _sendMail = transporter.sendMail.bind(transporter);
+transporter.sendMail = (m, ...rest) => {
+  if (m && typeof m.html === 'string') {
+    const list = Array.isArray(m.attachments) ? m.attachments.slice() : [];
+    const have = new Set(list.map((a) => a && a.cid));
+    const files = require('fs').readdirSync(IMG_DIR);
+    for (const mt of m.html.matchAll(/cid:([A-Za-z0-9_-]+)/g)) {
+      if (have.has(mt[1])) continue;
+      const f = files.find((n) => cidFor(n) === mt[1]);
+      if (f) { list.push(imageAttachment(f)); have.add(mt[1]); }
+    }
+    m = Object.assign({}, m, { attachments: list });
+  }
+  return _sendMail(m, ...rest);
+};
+
 module.exports = {
+  sendSiteRequestAdminEmail,
+  sendBlogConfirmEmail,
+  sendBlogPostEmail,
   transporter,
   wrapEmail,
   emailLayout,

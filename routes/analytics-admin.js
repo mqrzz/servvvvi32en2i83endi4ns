@@ -329,4 +329,137 @@ router.post('/uzel/reports/:id/handle', needAdminHeader, async (req, res) => {
   }
 });
 
+
+// ---------- Заявки с сайта ----------
+const REQ_STATUSES = ['new', 'in_work', 'done', 'spam'];
+router.get('/requests', async (req, res) => {
+  try {
+    const st = REQ_STATUSES.includes(req.query.status) ? req.query.status : '';
+    const q = String(req.query.q || '').trim().toLowerCase().slice(0, 60).replace(/[%_\\]/g, '');
+    const [list, cnt] = await Promise.all([
+      pool.query(
+        `SELECT id, name, contact, message, services, page, status, note, created_at FROM site_requests
+          WHERE ($1 = '' OR status = $1) AND ($2 = '' OR lower(name) LIKE '%' || $2 || '%' OR lower(contact) LIKE '%' || $2 || '%' OR lower(message) LIKE '%' || $2 || '%')
+          ORDER BY created_at DESC LIMIT $3`, [st, q, lim(req)]),
+      pool.query(`SELECT status, count(*)::int AS n FROM site_requests GROUP BY status`),
+    ]);
+    const counts = { new: 0, in_work: 0, done: 0, spam: 0 };
+    cnt.rows.forEach((r) => { counts[r.status] = r.n; });
+    res.json({ items: list.rows, counts });
+  } catch (err) {
+    console.error('analytics-admin/requests:', err);
+    res.status(500).json({ error: 'Не удалось загрузить заявки' });
+  }
+});
+router.post('/requests/:id', needAdminHeader, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10) || 0;
+    const b = req.body || {};
+    const status = REQ_STATUSES.includes(b.status) ? b.status : null;
+    const note = typeof b.note === 'string' ? b.note.slice(0, 1000) : null;
+    const r = await pool.query(
+      `UPDATE site_requests SET status = COALESCE($2, status), note = COALESCE($3, note), updated_at = now() WHERE id = $1 RETURNING id, status, note`, [id, status, note]);
+    if (!r.rows.length) return res.status(404).json({ error: 'Заявка не найдена' });
+    res.json({ ok: true, item: r.rows[0] });
+  } catch (err) {
+    console.error('analytics-admin/requests/update:', err);
+    res.status(500).json({ error: 'Не удалось обновить заявку' });
+  }
+});
+router.post('/requests/:id/delete', needAdminHeader, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM site_requests WHERE id = $1', [parseInt(req.params.id, 10) || 0]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('analytics-admin/requests/delete:', err);
+    res.status(500).json({ error: 'Не удалось удалить заявку' });
+  }
+});
+
+// ---------- Подписчики блога ----------
+let lastBroadcast = 0;
+router.get('/blog-subscribers', async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim().toLowerCase().slice(0, 60).replace(/[%_\\]/g, '');
+    const [list, cnt] = await Promise.all([
+      pool.query(`SELECT id, email, source, confirmed_at, created_at FROM blog_subscribers WHERE ($1 = '' OR lower(email) LIKE '%' || $1 || '%') ORDER BY created_at DESC LIMIT $2`, [q, lim(req)]),
+      pool.query(`SELECT count(*) FILTER (WHERE confirmed_at IS NOT NULL)::int AS confirmed, count(*) FILTER (WHERE confirmed_at IS NULL)::int AS pending FROM blog_subscribers`),
+    ]);
+    res.json({ items: list.rows, confirmed: cnt.rows[0].confirmed, pending: cnt.rows[0].pending });
+  } catch (err) {
+    console.error('analytics-admin/blog-subscribers:', err);
+    res.status(500).json({ error: 'Не удалось загрузить подписчиков' });
+  }
+});
+router.get('/blog-subscribers.csv', async (req, res) => {
+  try {
+    const { rows } = await pool.query(`SELECT email, confirmed_at, created_at FROM blog_subscribers WHERE confirmed_at IS NOT NULL ORDER BY created_at`);
+    const csv = 'email,confirmed_at,created_at\n' + rows.map((r) => [r.email, r.confirmed_at.toISOString(), r.created_at.toISOString()].join(',')).join('\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="blog-subscribers.csv"');
+    res.send(csv);
+  } catch (err) {
+    console.error('analytics-admin/blog-subscribers.csv:', err);
+    res.status(500).json({ error: 'Не удалось выгрузить подписчиков' });
+  }
+});
+router.post('/blog-subscribers/:id/delete', needAdminHeader, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM blog_subscribers WHERE id = $1', [parseInt(req.params.id, 10) || 0]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('analytics-admin/blog-subscribers/delete:', err);
+    res.status(500).json({ error: 'Не удалось удалить подписчика' });
+  }
+});
+// Разослать письмо о новой статье подтверждённым подписчикам. test=true отправляет только на ADMIN_NOTIFY_EMAIL
+router.post('/blog-subscribers/send', needAdminHeader, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const title = String(b.title || '').trim().slice(0, 150);
+    const excerpt = String(b.excerpt || '').trim().slice(0, 500);
+    const url = String(b.url || '').trim();
+    if (title.length < 3) return res.status(400).json({ error: 'Укажите заголовок письма' });
+    if (!/^https:\/\/antviz\.ru\/blog\/[A-Za-z0-9\/_\-.]*$/.test(url)) return res.status(400).json({ error: 'Ссылка должна вести на статью блога: https://antviz.ru/blog/...' });
+    const { sendBlogPostEmail } = require('../utils/mailer');
+    if (b.test === true) {
+      const to = process.env.ADMIN_NOTIFY_EMAIL || process.env.MAIL_FROM;
+      await sendBlogPostEmail(to, { title, excerpt, url, unsubscribeUrl: 'https://antviz.ru/blog/' });
+      return res.json({ ok: true, sent: 1, test: true });
+    }
+    if (Date.now() - lastBroadcast < 60000) return res.status(429).json({ error: 'Рассылка только что запускалась, подождите минуту' });
+    const { rows } = await pool.query('SELECT email, unsubscribe_token FROM blog_subscribers WHERE confirmed_at IS NOT NULL');
+    lastBroadcast = Date.now();
+    res.json({ ok: true, sent: rows.length, started: true });
+    (async () => {
+      for (const s of rows) {
+        try { await sendBlogPostEmail(s.email, { title, excerpt, url, unsubscribeUrl: `https://antviz.ru/api/site/blog-unsubscribe/${s.unsubscribe_token}` }); }
+        catch (e) { console.error('blog broadcast: не отправлено на', s.email, e.message); }
+        await new Promise((r) => setTimeout(r, 150));
+      }
+    })();
+  } catch (err) {
+    console.error('analytics-admin/blog-subscribers/send:', err);
+    res.status(500).json({ error: 'Не удалось отправить рассылку' });
+  }
+});
+
+// Блокировка владельца из списка пользователей: страница скрыта, входы закрыты
+router.post('/uzel/users/:id/ban', needAdminHeader, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10) || 0;
+    const banned = !(req.body && req.body.banned === false);
+    const u = await pool.query('UPDATE uzel_users SET banned = $2 WHERE id = $1 RETURNING id', [id, banned]);
+    if (!u.rows.length) return res.status(404).json({ error: 'Пользователь не найден' });
+    if (banned) {
+      await pool.query('UPDATE uzel_pages SET hidden = true, updated_at = now() WHERE user_id = $1', [id]);
+      await pool.query('DELETE FROM uzel_sessions WHERE user_id = $1', [id]);
+    }
+    res.json({ ok: true, banned });
+  } catch (err) {
+    console.error('analytics-admin/uzel/users/ban:', err);
+    res.status(500).json({ error: 'Не удалось изменить блокировку' });
+  }
+});
+
 module.exports = router;
