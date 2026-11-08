@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const pool = require('../db/pool');
 const icons = require('./uzel-icons');
+const STY = require('./uzel-styles');
 
 const THEMES = ['light', 'dark', 'blue', 'warm', 'mint', 'sunset', 'graphite', 'lilac'];
 const SHAPES = ['soft', 'round', 'square'];
@@ -177,6 +178,12 @@ const SOCIALS = {
   github: { hosts: ['github.com'], build: (v) => `https://github.com/${v}`, label: 'GitHub' },
   x: { hosts: ['x.com', 'twitter.com'], build: (v) => `https://x.com/${v}`, label: 'X' },
   whatsapp: { hosts: ['wa.me'], build: (v) => `https://wa.me/${v}`, label: 'WhatsApp' },
+  discord: { hosts: ['discord.gg', 'discord.com', 'www.discord.com'], build: (v) => `https://discord.gg/${v}`, label: 'Discord' },
+  spotify: { hosts: ['open.spotify.com'], build: (v) => `https://open.spotify.com/user/${v}`, label: 'Spotify' },
+  twitch: { hosts: ['twitch.tv', 'www.twitch.tv'], build: (v) => `https://twitch.tv/${v}`, label: 'Twitch' },
+  soundcloud: { hosts: ['soundcloud.com', 'www.soundcloud.com'], build: (v) => `https://soundcloud.com/${v}`, label: 'SoundCloud' },
+  steam: { hosts: ['steamcommunity.com'], build: (v) => `https://steamcommunity.com/id/${v}`, label: 'Steam' },
+  pinterest: { hosts: ['pinterest.com', 'www.pinterest.com', 'ru.pinterest.com'], build: (v) => `https://pinterest.com/${v}`, label: 'Pinterest' },
 };
 
 function normalizeSocial(type, value) {
@@ -247,7 +254,14 @@ function validatePage(input, existing, plan) {
     else if (inAcc && plan !== 'business') errors.push('Свой цвет кнопок доступен в тарифе Бизнес');
     else accent = inAcc;
   }
-  out.ext = { shape, info, lang, form, hideBadge: hideBadge && (paid || !!oldExt.hideBadge), accent };
+  const style = STY.STYLES.includes(input.style) ? input.style : (oldExt.style || 'classic');
+  const bg = input.bg === undefined ? (oldExt.bg || '') : (STY.BGS.includes(input.bg) || input.bg === '' ? input.bg : (oldExt.bg || ''));
+  const interests = input.interests === undefined ? (oldExt.interests || []) : (Array.isArray(input.interests) ? input.interests.map((x) => cleanText(x, 24)).filter(Boolean).slice(0, 8) : []);
+  const thanks = input.thanks === undefined ? (oldExt.thanks || '') : cleanText(input.thanks, 60);
+  const hello = input.hello === undefined ? (oldExt.hello || '') : cleanText(input.hello, 40);
+  const location = input.location === undefined ? (oldExt.location || '') : cleanText(input.location, 40);
+  const status = input.status === undefined ? (oldExt.status || '') : cleanText(input.status, 24);
+  out.ext = { shape, info, lang, form, hideBadge: hideBadge && (paid || !!oldExt.hideBadge), accent, style, bg, interests, thanks, hello, location, status };
 
   const socials = [];
   const seen = new Set();
@@ -297,11 +311,16 @@ function validatePage(input, existing, plan) {
   }
   out.links = links;
 
-  if (input.music && (input.music.url || input.music.title)) {
-    const url = normalizeUrl(input.music.url);
-    const title = cleanText(input.music.title, 60);
-    if (!url || !title) errors.push('Для музыки нужны название и ссылка');
-    else out.music = { title, url };
+  if (input.music && (input.music.url || input.music.title || input.music.audio)) {
+    const mm = input.music;
+    const url = mm.url ? normalizeUrl(mm.url) : null;
+    const title = cleanText(mm.title, 60);
+    const artist = cleanText(mm.artist, 60);
+    const cover = /^[a-f0-9]{24}\.webp$/.test(String(mm.cover || '')) ? mm.cover : '';
+    const audio = /^[a-f0-9]{24}\.mp3$/.test(String(mm.audio || '')) ? mm.audio : '';
+    if (mm.url && !url) errors.push('Проверьте ссылку на трек');
+    else if (!title || (!url && !audio)) errors.push('Для музыки нужны название и ссылка на трек или MP3');
+    else out.music = Object.assign({ title }, url ? { url } : {}, artist ? { artist } : {}, cover ? { cover } : {}, audio ? { audio } : {});
   } else out.music = null;
 
   return errors.length ? { ok: false, errors } : { ok: true, data: out };
@@ -386,7 +405,7 @@ function renderPublicPage(page, origin, opts) {
   const infoBtns = [info.phone ? ['i-phone', 'phone', L.call] : null, info.email ? ['i-email', 'mail', L.mail] : null, info.address ? ['i-map', 'map-pin', L.route] : null].filter(Boolean)
     .map(([id, ic, tx]) => `<a href="${go(id)}" rel="nofollow noopener ugc">${lucideSvg(ic)}<span>${tx}</span></a>`).join('');
   const shape = ext.shape || 'soft';
-  const music = page.music ? `<a href="${go('music')}" rel="nofollow noopener ugc">${lucideSvg('music')}<span>${esc(page.music.title)}</span>${arrow}</a>` : '';
+  const music = page.music && page.music.url ? `<a href="${go('music')}" rel="nofollow noopener ugc">${lucideSvg('music')}<span>${esc(page.music.title)}</span>${arrow}</a>` : '';
   const f = ext.form || {};
   const form = f.enabled ? `<form class="fm" method="post" action="${opts.preview ? '#' : '/api/uzel/lead/' + esc(page.slug)}" ${opts.preview ? 'onsubmit="return false"' : ''}><h2 class="hd" style="margin:0 0 4px">${esc(f.title)}</h2><input name="name" maxlength="60" placeholder="${L.name}" autocomplete="name"><input name="contact" maxlength="120" required placeholder="${L.contact}" autocomplete="tel"><textarea name="message" maxlength="600" rows="3" placeholder="${L.msg}"></textarea><input class="hp" type="text" name="website" tabindex="-1" autocomplete="off" aria-hidden="true"><button type="submit">${esc(f.button)}</button></form>` : '';
   const desc = esc(page.bio || page.subtitle || L.pageOf(page.name));
@@ -397,6 +416,9 @@ function renderPublicPage(page, origin, opts) {
     accentCss = `--ac:${ext.accent};--act:${lum > 0.62 ? '#0b0b0d' : '#ffffff'}`;
   }
   const badge = ext.hideBadge && plan !== 'free' ? '' : `<a href="${esc(origin)}${BASE}/">${L.made}</a>`;
+  if (STY.STYLES.includes(ext.style) && ext.style !== 'classic') {
+    return STY.renderStyled(page, origin, { esc, ext, BASE, lucideSvg, go, opts, soc, links, infoBtns, form, badge, desc, img, accentCss, avatar, gradient: gradient(page.name), report: opts.preview ? '#' : '/api/uzel/report/' + esc(page.slug), reportLabel: L.report });
+  }
   return `<!doctype html><html lang="${ext.lang === 'en' ? 'en' : 'ru'}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(page.name)} · Узел</title><meta name="description" content="${desc}"><meta name="robots" content="noindex,nofollow">
 <meta property="og:title" content="${esc(page.name)}"><meta property="og:description" content="${desc}"><meta property="og:type" content="profile">${img}
@@ -410,4 +432,4 @@ function simplePage(title, body, status) {
   return { status: status || 200, html: `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${esc(title)} · Узел</title><style>${PAGE_CSS}.card{background:#fff;border-radius:28px;padding:30px;box-shadow:0 0 0 1px #0b0b0d1a;text-align:left;width:100%}.card h1{font-size:26px;margin:0 0 12px}.card p{margin:0 0 14px;color:#4a474b}.card select,.card textarea{width:100%;border:0;background:#f2f2f4;border-radius:16px;padding:14px 16px;font:inherit;margin-bottom:12px}.card button,.card .b{display:inline-flex;align-items:center;height:52px;padding:0 24px;border-radius:16px;border:0;background:#06f;color:#fff;font:700 17px inherit;text-decoration:none;cursor:pointer}</style></head><body class="t-light"><main class="w"><div class="card">${body}</div></main></body></html>` };
 }
 
-module.exports = { LIMITS, FREE_THEMES, LANGS, PLAN_PRICES, PAGE_PREFIX, planOf, pageUrl, SHAPES, BASE, ensureUzelTables, cleanupUzel, THEMES, RESERVED, SOCIALS, cleanText, validateSlug, normalizeUrl, normalizeSocial, validatePage, newId, renderPublicPage, simplePage, esc };
+module.exports = { STYLES: STY.STYLES, BGS: STY.BGS, PLAYER_HASH: STY.PLAYER_HASH, LIMITS, FREE_THEMES, LANGS, PLAN_PRICES, PAGE_PREFIX, planOf, pageUrl, SHAPES, BASE, ensureUzelTables, cleanupUzel, THEMES, RESERVED, SOCIALS, cleanText, validateSlug, normalizeUrl, normalizeSocial, validatePage, newId, renderPublicPage, simplePage, esc };

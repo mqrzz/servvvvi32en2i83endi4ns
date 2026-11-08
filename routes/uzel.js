@@ -314,6 +314,39 @@ router.post('/me/avatar', needUser, limiter(60 * 1000, 10), async (req, res) => 
   }
 });
 
+router.post('/me/music-file', needUser, limiter(60 * 1000, 12), async (req, res) => {
+  try {
+    const kind = req.body && req.body.kind;
+    const raw = String((req.body && req.body.data) || '');
+    if (kind === 'audio') {
+      const m = /^data:audio\/(mpeg|mp3);base64,([A-Za-z0-9+/=]+)$/.exec(raw);
+      if (!m) return res.status(400).json({ error: 'Загрузите MP3' });
+      const buf = Buffer.from(m[2], 'base64');
+      if (buf.length > 10 * 1024 * 1024) return res.status(413).json({ error: 'MP3 больше 10 МБ' });
+      const ok = (buf.length > 4 && buf.slice(0, 3).toString() === 'ID3') || (buf.length > 4 && buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0);
+      if (!ok) return res.status(400).json({ error: 'Это не похоже на MP3' });
+      const file = crypto.randomBytes(12).toString('hex') + '.mp3';
+      fs.writeFileSync(path.join(UPLOAD_DIR, file), buf);
+      return res.json({ ok: true, file });
+    }
+    if (kind === 'cover') {
+      const m = /^data:image\/(png|jpe?g|webp);base64,([A-Za-z0-9+/=]+)$/.exec(raw);
+      if (!m) return res.status(400).json({ error: 'Загрузите изображение PNG, JPG или WebP' });
+      const buf = Buffer.from(m[2], 'base64');
+      if (buf.length > 6 * 1024 * 1024) return res.status(413).json({ error: 'Файл больше 6 МБ' });
+      let out;
+      try { out = await sharp(buf, { limitInputPixels: 40e6 }).rotate().resize(256, 256, { fit: 'cover' }).webp({ quality: 80 }).toBuffer(); } catch { return res.status(400).json({ error: 'Не удалось прочитать изображение' }); }
+      const file = crypto.randomBytes(12).toString('hex') + '.webp';
+      fs.writeFileSync(path.join(UPLOAD_DIR, file), out);
+      return res.json({ ok: true, file });
+    }
+    res.status(400).json({ error: 'Неизвестный тип файла' });
+  } catch (err) {
+    console.error('uzel/music-file:', err);
+    res.status(500).json({ error: 'Не удалось загрузить файл' });
+  }
+});
+
 router.delete('/me/avatar', needUser, async (req, res) => {
   const cur = await pool.query('UPDATE uzel_pages SET avatar = NULL WHERE user_id = $1 RETURNING (SELECT avatar FROM uzel_pages WHERE user_id = $1) AS old', [req.uz.user.id]);
   if (cur.rows[0] && cur.rows[0].old) fs.unlink(path.join(UPLOAD_DIR, cur.rows[0].old), () => {});
@@ -386,7 +419,7 @@ function refHost(ref) {
   } catch { return null; }
 }
 const SEC = {
-  'Content-Security-Policy': `default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
+  'Content-Security-Policy': `default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'; script-src '${U.PLAYER_HASH}'; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'strict-origin-when-cross-origin',
 };
@@ -461,10 +494,10 @@ router.get('/qr/:slug', limiter(60 * 1000, 60), async (req, res) => {
 
 router.get('/media/:file', (req, res) => {
   const f = String(req.params.file);
-  if (!/^[a-f0-9]{24}\.webp$/.test(f)) return res.status(404).end();
+  if (!/^[a-f0-9]{24}\.(webp|mp3)$/.test(f)) return res.status(404).end();
   const p = path.join(UPLOAD_DIR, f);
   if (!fs.existsSync(p)) return res.status(404).end();
-  res.set({ 'Cache-Control': 'public, max-age=31536000, immutable', 'X-Content-Type-Options': 'nosniff', 'Content-Type': 'image/webp' }).sendFile(p);
+  res.set({ 'Cache-Control': 'public, max-age=31536000, immutable', 'X-Content-Type-Options': 'nosniff', 'Content-Type': f.endsWith('.mp3') ? 'audio/mpeg' : 'image/webp' }).sendFile(p);
 });
 
 router.get('/report/:slug', async (req, res) => {
@@ -500,7 +533,14 @@ router.get('/me/preview', needUser, async (req, res) => {
       const s = U.simplePage('Предпросмотр', '<h1>Страница ещё не создана</h1><p>Заполните профиль и сохраните его, тогда здесь появится предпросмотр.</p>');
       return res.type('html').send(s.html);
     }
-    res.type('html').send(U.renderPublicPage(rows[0], ORIGIN, { preview: true, plan: req.uz.user.plan }));
+    const pg = Object.assign({}, rows[0]);
+    const q = req.query || {};
+    const ov = {};
+    if (U.STYLES.includes(q.style)) ov.style = q.style;
+    if (U.BGS.includes(q.bg) || q.bg === '') ov.bg = q.bg === undefined ? undefined : q.bg;
+    if (Object.keys(ov).length) pg.ext = Object.assign({}, pg.ext, ov);
+    if (U.THEMES.includes(q.theme)) pg.theme = q.theme;
+    res.type('html').send(U.renderPublicPage(pg, ORIGIN, { preview: true, plan: req.uz.user.plan }));
   } catch (err) {
     console.error('uzel/preview:', err);
     res.status(500).type('text').send('Ошибка сервера');
