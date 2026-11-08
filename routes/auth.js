@@ -218,6 +218,23 @@ router.post('/login/start', verifyCodeLimiter, async (req, res) => {
   }
 });
 
+// Вход в панель администрирования: сначала проверяем, что это почта администратора, и только потом шлём код
+router.post('/login/admin-check', sendCodeLimiter, async (req, res) => {
+  try {
+    const { email } = req.body || {};
+    if (!email || !EMAIL_RE.test(email)) return res.status(400).json({ error: 'Некорректный email' });
+    const { rows } = await pool.query(
+      `SELECT 1 FROM users WHERE email = $1 AND email_verified = TRUE AND role = 'admin'`,
+      [email.trim().toLowerCase()]
+    );
+    if (!rows.length) return res.status(403).json({ error: 'У этого адреса нет доступа в панель администрирования' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('login/admin-check error:', err);
+    res.status(500).json({ error: 'Не удалось проверить адрес' });
+  }
+});
+
 router.post('/login/send-code', sendCodeLimiter, async (req, res) => {
   try {
     const { email } = req.body;

@@ -378,6 +378,7 @@ router.post('/requests/:id/delete', needAdminHeader, async (req, res) => {
 
 // ---------- Подписчики блога ----------
 let lastBroadcast = 0;
+const BROADCAST_GAP_MS = process.env.BROADCAST_GAP_MS !== undefined ? Number(process.env.BROADCAST_GAP_MS) : 60000;
 router.get('/blog-subscribers', async (req, res) => {
   try {
     const q = String(req.query.q || '').trim().toLowerCase().slice(0, 60).replace(/[%_\\]/g, '');
@@ -427,7 +428,7 @@ router.post('/blog-subscribers/send', needAdminHeader, async (req, res) => {
       await sendBlogPostEmail(to, { title, excerpt, url, unsubscribeUrl: 'https://antviz.ru/blog/' });
       return res.json({ ok: true, sent: 1, test: true });
     }
-    if (Date.now() - lastBroadcast < 60000) return res.status(429).json({ error: 'Рассылка только что запускалась, подождите минуту' });
+    if (Date.now() - lastBroadcast < BROADCAST_GAP_MS) return res.status(429).json({ error: 'Рассылка только что запускалась, подождите минуту' });
     const { rows } = await pool.query('SELECT email, unsubscribe_token FROM blog_subscribers WHERE confirmed_at IS NOT NULL');
     lastBroadcast = Date.now();
     res.json({ ok: true, sent: rows.length, started: true });
@@ -440,6 +441,39 @@ router.post('/blog-subscribers/send', needAdminHeader, async (req, res) => {
     })();
   } catch (err) {
     console.error('analytics-admin/blog-subscribers/send:', err);
+    res.status(500).json({ error: 'Не удалось отправить рассылку' });
+  }
+});
+
+
+// Рассылка своим HTML. test=true отправляет только на ADMIN_NOTIFY_EMAIL. Плейсхолдеры: {{unsubscribe}}, {{email}}
+router.post('/blog-subscribers/send-html', needAdminHeader, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const subject = String(b.subject || '').trim().slice(0, 150);
+    const html = String(b.html || '');
+    if (subject.length < 3) return res.status(400).json({ error: 'Укажите тему письма' });
+    if (html.length < 20) return res.status(400).json({ error: 'Вставьте HTML-код письма' });
+    if (html.length > 400000) return res.status(400).json({ error: 'HTML больше 400 КБ, Gmail такое обрежет. Сократите письмо' });
+    const { sendCustomHtmlEmail } = require('../utils/mailer');
+    if (b.test === true) {
+      const to = process.env.ADMIN_NOTIFY_EMAIL || process.env.MAIL_FROM;
+      await sendCustomHtmlEmail(to, { subject, html, unsubscribeUrl: 'https://antviz.ru/blog/' });
+      return res.json({ ok: true, sent: 1, test: true });
+    }
+    if (Date.now() - lastBroadcast < BROADCAST_GAP_MS) return res.status(429).json({ error: 'Рассылка только что запускалась, подождите минуту' });
+    const { rows } = await pool.query('SELECT email, unsubscribe_token FROM blog_subscribers WHERE confirmed_at IS NOT NULL');
+    lastBroadcast = Date.now();
+    res.json({ ok: true, sent: rows.length, started: true });
+    (async () => {
+      for (const s of rows) {
+        try { await sendCustomHtmlEmail(s.email, { subject, html, unsubscribeUrl: `https://antviz.ru/api/site/blog-unsubscribe/${s.unsubscribe_token}` }); }
+        catch (e) { console.error('html broadcast: не отправлено на', s.email, e.message); }
+        await new Promise((r) => setTimeout(r, 150));
+      }
+    })();
+  } catch (err) {
+    console.error('analytics-admin/blog-subscribers/send-html:', err);
     res.status(500).json({ error: 'Не удалось отправить рассылку' });
   }
 });

@@ -431,7 +431,7 @@ router.get('/go/:slug/:id', limiter(60 * 1000, 120), async (req, res) => {
       const inf = (page.ext && page.ext.info) || {};
       if (id === 'i-phone' && inf.phone) url = 'tel:' + inf.phone;
       else if (id === 'i-email' && inf.email) url = 'mailto:' + inf.email;
-      else if (id === 'i-map' && inf.address) url = 'https://yandex.ru/maps/?text=' + encodeURIComponent(inf.address);
+      else if (id === 'i-map' && inf.address) url = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(inf.address);
       else if (id === 'music') url = page.music && page.music.url;
       else if (id.startsWith('s-')) { const s = (page.socials || []).find((x) => 's-' + x.type === id); url = s && s.url; }
       else { const l = (page.links || []).find((x) => x.id === id && x.enabled !== false); url = l && l.url; }

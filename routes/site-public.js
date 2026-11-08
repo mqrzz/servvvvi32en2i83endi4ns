@@ -100,15 +100,29 @@ router.get('/blog-confirm/:token', async (req, res) => {
   }
 });
 
+// Отписка: по ссылке из письма открывается страница с кнопкой (так почтовые сканеры не отписывают людей сами),
+// кнопка и почтовый клиент (Gmail «Отписаться») отправляют POST
+const unsubDo = async (t) => {
+  if (!/^[a-f0-9]{48}$/.test(t)) return false;
+  const { rows } = await pool.query('DELETE FROM blog_subscribers WHERE unsubscribe_token = $1 RETURNING id', [t]);
+  return rows.length > 0;
+};
 router.get('/blog-unsubscribe/:token', async (req, res) => {
+  const t = String(req.params.token || '');
+  const page = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Отписаться от рассылки</title></head>
+<body style="margin:0;min-height:100vh;display:grid;place-items:center;background:#f2f2f4;font:17px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#0b0b0d">
+<main style="max-width:460px;margin:20px;background:#fff;border-radius:28px;padding:36px;box-shadow:0 0 0 1px #0b0b0d1a"><h1 style="font-size:26px;letter-spacing:-.04em;margin:0 0 12px">Отписаться от рассылки?</h1><p style="margin:0 0 24px;color:#6e6a70">Письма о новых статьях блога перестанут приходить на этот адрес.</p>
+<form method="post" action="${ORIGIN}/api/site/blog-unsubscribe/${/^[a-f0-9]{48}$/.test(t) ? t : 'x'}"><button type="submit" style="border:0;cursor:pointer;background:#06f;color:#fff;font:700 16px system-ui,sans-serif;padding:14px 26px;border-radius:16px">Отписаться</button> <a href="${ORIGIN}/blog/" style="margin-left:12px;color:#6e6a70">Остаться</a></form></main></body></html>`;
+  res.type('html').send(page);
+});
+router.post('/blog-unsubscribe/:token', express.urlencoded({ extended: false }), async (req, res) => {
   try {
-    const t = String(req.params.token || '');
-    const { rows } = /^[a-f0-9]{48}$/.test(t)
-      ? await pool.query('DELETE FROM blog_subscribers WHERE unsubscribe_token = $1 RETURNING id', [t])
-      : { rows: [] };
-    res.status(rows.length ? 200 : 404).type('html').send(rows.length ? resultPage('Вы отписались', 'Адрес удалён, писем больше не будет.') : resultPage('Ссылка не работает', 'Адрес уже удалён из рассылки.'));
+    const ok = await unsubDo(String(req.params.token || ''));
+    // Gmail и другие клиенты шлют POST в фоне и ждут просто 200
+    if (req.body && req.body['List-Unsubscribe'] === 'One-Click') return res.status(200).send('ok');
+    res.status(ok ? 200 : 404).type('html').send(ok ? resultPage('Вы отписались', 'Адрес удалён, писем больше не будет.') : resultPage('Ссылка не работает', 'Адрес уже удалён из рассылки.'));
   } catch (err) {
-    console.error('GET /api/site/blog-unsubscribe:', err);
+    console.error('POST /api/site/blog-unsubscribe:', err);
     res.status(500).type('html').send(resultPage('Ошибка', 'Не получилось отписать. Попробуйте позже.'));
   }
 });

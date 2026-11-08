@@ -22,14 +22,17 @@ if (process.env.MAIL_CAPTURE_FILE) {
 }
 
 const IMG_DIR = path.join(__dirname, '..', 'img');
-const SENT_WITH_FILE = 'geserd-sent-with-light.gif';
+const ADMIN_PATH = process.env.ADMIN_PATH || 'p6c03d302f34840';
+const SENT_WITH_FILE = 'geserd-sent-with-light.png';
+// Картинки писем лежат на сайте и подключаются ссылками: в письме нет вложений, клиент не показывает «скрепку»
+const MAIL_IMG = (process.env.MAIL_IMG_URL || 'https://antviz.ru/assets/mail').replace(/\/$/, '');
 
-const LOGO_FILE = 'logo-white.png';
+const LOGO_FILE = 'uzel-mark.png';
 const SOCIAL_LINKS = [
-  { url: 'https://t.me/antviz_official', file: 'telegram-button.png' },
-  { url: 'https://instagram.com/antviz_official', file: 'instagram-button.png' },
-  { url: 'https://tiktok.com/@antviz_official', file: 'tiktok-button.png' },
-  { url: 'https://threads.com/@antviz_official', file: 'threads-button.png' },
+  { url: 'https://t.me/antviz_official', file: 'social-telegram.png' },
+  { url: 'https://instagram.com/antviz_official', file: 'social-instagram.png' },
+  { url: 'https://tiktok.com/@antviz_official', file: 'social-tiktok.png' },
+  { url: 'https://threads.com/@antviz_official', file: 'social-threads.png' },
 ];
 
 function cidFor(filename) {
@@ -88,7 +91,7 @@ function emailLayout({ brand, heading, lead, bodyHtml, footerHtml, preheader, lo
     <tr><td style="height:12px;line-height:12px;font-size:0;">&nbsp;</td></tr>
     <tr><td style="background:#ffffff;border-radius:28px;padding:28px;font-family:${FONT};font-size:16px;line-height:1.55;color:#2b2b30;">${bodyHtml}</td></tr>
     <tr><td align="center" style="padding:22px 10px 0;font-family:${FONT};font-size:12px;line-height:1.6;color:#7b8294;">${footerHtml}</td></tr>
-    <tr><td align="center" style="padding:26px 0 4px;"><a href="https://geserd.com" target="_blank" style="text-decoration:none;"><img src="cid:${cidFor(SENT_WITH_FILE)}" width="180" height="66" alt="Sent with Geserd" style="display:block;border:0;width:180px;height:66px;margin:0 auto;"></a></td></tr>
+    <tr><td align="center" style="padding:26px 0 4px;"><a href="https://geserd.com" target="_blank" style="text-decoration:none;"><img src="cid:${cidFor(SENT_WITH_FILE)}" width="180" height="77" alt="Sent with Geserd" style="display:block;border:0;width:180px;height:77px;margin:0 auto;"></a></td></tr>
   </table>
 </td></tr></table></body></html>`;
 }
@@ -96,7 +99,7 @@ function emailLayout({ brand, heading, lead, bodyHtml, footerHtml, preheader, lo
 function wrapEmail({ heading, bodyHtml, footerNote }) {
   return emailLayout({
     brandName: 'antviz', logoCid: cidFor(LOGO_FILE), art: 'antviz-art', heading, bodyHtml,
-    footerHtml: `${socialRow()}<div style="margin-top:14px;font-size:13px;font-weight:600;color:#191b1e;">@antviz_official</div><div style="margin-top:4px;">Москва, Россия</div><div style="margin-top:12px;">${footerNote || 'Antviz &middot; antviz.ru'}</div><div style="margin-top:10px;font-size:10.5px;color:#9aa1b2;max-width:420px;">*Meta Platforms Inc. (включая Instagram и Threads) признана экстремистской организацией, её деятельность запрещена на территории РФ.</div>`,
+    footerHtml: `${socialRow()}<div style="margin-top:14px;font-size:13px;font-weight:600;color:#191b1e;">@antviz_official</div>${footerNote ? `<div style="margin-top:12px;">${footerNote}</div>` : ''}<div style="margin-top:12px;font-size:10.5px;color:#9aa1b2;max-width:420px;">*Meta Platforms Inc. (включая Instagram и Threads) признана экстремистской организацией, её деятельность запрещена на территории РФ.</div>`,
   });
 }
 
@@ -111,14 +114,14 @@ function codeBlock(code) {
 }
 
 function button(text, url) {
-  return `<a href="${url}" style="display:inline-block;background:#0066ff;color:#ffffff;text-decoration:none;font-weight:700;padding:15px 28px;border-radius:18px;font-size:16px;margin-top:8px;font-family:${FONT};">${text}</a>`;
+  return `<a href="${url}" style="display:inline-block;background:#0066ff;color:#ffffff;text-decoration:none;font-weight:700;padding:11px 22px;border-radius:14px;font-size:15px;margin-top:6px;font-family:${FONT};">${text}</a>`;
 }
 
 /* ---------- письма «Узла» ---------- */
 function uzelFooter(lang) {
   return lang === 'en'
-    ? 'Uzel is a service by <a href="https://geserd.com" style="color:#5b6a8f;text-decoration:underline;">Geserd</a><br>You got this email because someone entered your address on Uzel.'
-    : 'Узел — сервис <a href="https://geserd.com" style="color:#5b6a8f;text-decoration:underline;">Geserd</a><br>Вы получили письмо, потому что ваш адрес указали на сайте Узла.';
+    ? 'You got this email because someone entered your address on Uzel.'
+    : 'Вы получили письмо, потому что ваш адрес указали на сайте Узла.';
 }
 
 function uzelCodeEmail({ code, lang }) {
@@ -274,7 +277,7 @@ async function sendNotificationEmail(toEmail, { title, text, buttonText, buttonU
       ${text ? `<p>${escHtml(text).replace(/\n/g, '<br/>')}</p>` : ''}
       ${buttonUrl ? `<div style="margin-top:8px;">${button(escHtml(buttonText || 'Открыть'), buttonUrl)}</div>` : ''}
     `,
-    footerNote: 'Antviz &middot; antviz.ru<br/>Это письмо пришло, потому что вы включили e-mail-уведомления в настройках кабинета.',
+    footerNote: 'Это письмо пришло, потому что вы включили e-mail-уведомления в настройках кабинета.',
   });
 
   await transporter.sendMail({
@@ -295,7 +298,7 @@ async function sendSiteRequestAdminEmail({ id, name, contact, message, services,
   const html = wrapEmail({
     heading: 'Новая заявка с сайта',
     bodyHtml: `<table style="border-collapse:collapse;font-size:15px">${row('Имя', escHtml(name))}${row('Контакт', escHtml(contact))}${services.length ? row('Что нужно', escHtml(services.join(', '))) : ''}${page ? row('Страница', escHtml(page)) : ''}</table>
-      <p style="margin:16px 0 0;white-space:pre-wrap">${escHtml(message)}</p>${button('Открыть в админке', 'https://antviz.ru/admin/requests')}`,
+      <p style="margin:16px 0 0;white-space:pre-wrap">${escHtml(message)}</p>${button('Открыть в панели администрирования', `https://antviz.ru/${ADMIN_PATH}/requests`)}`,
     footerNote: `Заявка №${id} · antviz.ru`,
   });
   await transporter.sendMail({ from: process.env.MAIL_FROM, to, subject: `Заявка с сайта: ${String(name).slice(0, 40)}`, html, attachments: baseAttachments() });
@@ -306,7 +309,7 @@ async function sendBlogConfirmEmail(toEmail, confirmUrl, unsubscribeUrl) {
     heading: 'Подтвердите подписку на блог',
     bodyHtml: `<p>Этот адрес указали для подписки на блог Antviz: письмо придёт, когда выйдет новая статья.</p>
       <p style="margin-top:12px;">Если это были не вы, просто проигнорируйте письмо: без подтверждения ничего не придёт, адрес удалится через 3 суток.</p>${button('Подтвердить подписку', confirmUrl)}`,
-    footerNote: `Antviz &middot; antviz.ru<br/><a href="${unsubscribeUrl}" style="color:#9a9a9e;">Не подписывался(-ась), удалить адрес</a>`,
+    footerNote: `<a href="${unsubscribeUrl}" style="color:#9a9a9e;">Не подписывался(-ась), удалить адрес</a>`,
   });
   await transporter.sendMail({ from: process.env.MAIL_FROM, to: toEmail, subject: 'Подтвердите подписку на блог Antviz', html, attachments: baseAttachments() });
 }
@@ -315,10 +318,10 @@ async function sendBlogPostEmail(toEmail, { title, excerpt, url, unsubscribeUrl 
   const html = wrapEmail({
     heading: title,
     bodyHtml: `${excerpt ? `<p>${escHtml(excerpt)}</p>` : ''}${button('Читать статью', url)}`,
-    footerNote: `Antviz &middot; antviz.ru<br/><a href="${unsubscribeUrl}" style="color:#9a9a9e;">Отписаться от рассылки</a>`,
+    footerNote: `<a href="${unsubscribeUrl}" style="color:#9a9a9e;">Отписаться от рассылки</a>`,
   });
   await transporter.sendMail({ from: process.env.MAIL_FROM, to: toEmail, subject: String(title).slice(0, 150), html, attachments: baseAttachments(),
-    headers: { 'List-Unsubscribe': `<${unsubscribeUrl}>` } });
+    headers: { 'List-Unsubscribe': `<${unsubscribeUrl}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' } });
 }
 
 
@@ -326,20 +329,37 @@ async function sendBlogPostEmail(toEmail, { title, excerpt, url, unsubscribeUrl 
 const _sendMail = transporter.sendMail.bind(transporter);
 transporter.sendMail = (m, ...rest) => {
   if (m && typeof m.html === 'string') {
-    const list = Array.isArray(m.attachments) ? m.attachments.slice() : [];
-    const have = new Set(list.map((a) => a && a.cid));
     const files = require('fs').readdirSync(IMG_DIR);
-    for (const mt of m.html.matchAll(/cid:([A-Za-z0-9_-]+)/g)) {
-      if (have.has(mt[1])) continue;
-      const f = files.find((n) => cidFor(n) === mt[1]);
-      if (f) { list.push(imageAttachment(f)); have.add(mt[1]); }
-    }
-    m = Object.assign({}, m, { attachments: list });
+    m = Object.assign({}, m, {
+      html: m.html.replace(/cid:([A-Za-z0-9_-]+)/g, (x, id) => { const f = files.find((n) => cidFor(n) === id); return f ? `${MAIL_IMG}/${f}` : x; }),
+      attachments: (Array.isArray(m.attachments) ? m.attachments : []).filter((a) => !(a && a.cid)),
+    });
   }
   return _sendMail(m, ...rest);
 };
 
+
+// Рассылка своим HTML: подставляем адрес и ссылку отписки, гарантируем отписку и плашку Geserd в самом конце
+function finalizeCustomHtml(html, { email, unsubscribeUrl }) {
+  let h = String(html).replace(/\{\{\s*unsubscribe\s*\}\}/gi, unsubscribeUrl).replace(/\{\{\s*email\s*\}\}/gi, escHtml(email));
+  const tail = [];
+  if (!h.includes(unsubscribeUrl)) tail.push(`<div style="text-align:center;font:12px/1.6 Arial,sans-serif;color:#7b8294;padding:20px 10px 0;"><a href="${unsubscribeUrl}" style="color:#7b8294;text-decoration:underline;">Отписаться от рассылки</a></div>`);
+  if (!/geserd-sent-with-light/.test(h)) tail.push(`<div style="text-align:center;padding:24px 0 8px;"><a href="https://geserd.com" target="_blank" style="text-decoration:none;"><img src="${MAIL_IMG}/${SENT_WITH_FILE}" width="180" height="77" alt="Sent with Geserd" style="display:inline-block;border:0;width:180px;height:77px;"></a></div>`);
+  if (!tail.length) return h;
+  return /<\/body>/i.test(h) ? h.replace(/<\/body>/i, tail.join('') + '</body>') : h + tail.join('');
+}
+
+async function sendCustomHtmlEmail(toEmail, { subject, html, unsubscribeUrl }) {
+  await transporter.sendMail({
+    from: process.env.MAIL_FROM, to: toEmail, subject: String(subject).slice(0, 150),
+    html: finalizeCustomHtml(html, { email: toEmail, unsubscribeUrl }),
+    headers: { 'List-Unsubscribe': `<${unsubscribeUrl}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' },
+  });
+}
+
 module.exports = {
+  finalizeCustomHtml,
+  sendCustomHtmlEmail,
   sendSiteRequestAdminEmail,
   sendBlogConfirmEmail,
   sendBlogPostEmail,
@@ -370,7 +390,7 @@ async function sendStatusSubscribedEmail(toEmail, unsubscribeUrl) {
       <p style="margin-top:12px;">Письма будут приходить только когда что-то действительно меняется — без рассылок.</p>
       ${button('Смотреть статус', 'https://antviz.ru/status')}
     `,
-    footerNote: `Antviz &middot; antviz.ru<br/><a href="${unsubscribeUrl}" style="color:#9a9a9e;">Отписаться от уведомлений о статусе</a>`,
+    footerNote: `<a href="${unsubscribeUrl}" style="color:#9a9a9e;">Отписаться от уведомлений о статусе</a>`,
   });
 
   await transporter.sendMail({
@@ -390,7 +410,7 @@ async function sendStatusConfirmEmail(toEmail, confirmUrl, unsubscribeUrl) {
       <p style="margin-top:12px;">Чтобы получать письма, подтвердите подписку. Если это были не вы, просто проигнорируйте письмо: без подтверждения вы ничего не получите, а адрес будет удалён через 3 суток.</p>
       ${button('Подтвердить подписку', confirmUrl)}
     `,
-    footerNote: `Antviz &middot; antviz.ru<br/><a href="${unsubscribeUrl}" style="color:#9a9a9e;">Не подписывался(-ась), удалить адрес</a>`,
+    footerNote: `<a href="${unsubscribeUrl}" style="color:#9a9a9e;">Не подписывался(-ась), удалить адрес</a>`,
   });
 
   await transporter.sendMail({
@@ -418,7 +438,7 @@ async function sendIncidentUpdateEmail(toEmail, { incidentTitle, status, message
       <p>${message}</p>
       ${button('Смотреть статус', 'https://antviz.ru/status')}
     `,
-    footerNote: `Antviz &middot; antviz.ru<br/><a href="${unsubscribeUrl}" style="color:#9a9a9e;">Отписаться от уведомлений о статусе</a>`,
+    footerNote: `<a href="${unsubscribeUrl}" style="color:#9a9a9e;">Отписаться от уведомлений о статусе</a>`,
   });
 
   await transporter.sendMail({
@@ -454,7 +474,7 @@ async function sendEnterpriseApplicationAdminEmail(a) {
         ${a.timeline ? `<div><b>Сроки:</b> ${a.timeline}</div>` : ''}
         <div style="margin-top:8px;"><b>Описание:</b><br/>${String(a.description || '').replace(/\n/g, '<br/>')}</div>
       </div>
-      ${button('Открыть в админке', 'https://antviz.ru/admin/enterprise.html')}
+      ${button('Открыть в панели администрирования', `https://antviz.ru/${ADMIN_PATH}/`)}
     `,
   });
 
