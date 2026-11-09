@@ -23,7 +23,7 @@ const PAGE_PREFIX = '/p';
 function planOf(u) {
   return u && (u.plan === 'pro' || u.plan === 'business') && (!u.plan_until || new Date(u.plan_until).getTime() > Date.now()) ? u.plan : 'free';
 }
-const RESERVED = new Set(['p', 'en', 'pricing', 'examples', 'guides', 'plan', 'profile', 'links', 'design', 'stats', 'form', 'inbox', 'security', 'preview', 'start', 'more', 'lead', 'qr', 'sitemap', 'app', 'api', 'admin', 'assets', 'go', 'media', 'report', 'rules', 'privacy', 'login', 'logout', 'static', 'www', 'mail', 'help', 'support', 'antviz', 'uzel', 'about', 'terms', 'status', 'blog', 'robots', 'sitemap', 'favicon', 'index', 'dashboard', 'settings', 'me', 'null', 'undefined', 'test', 'root', 'system', 'security', 'billing', 'pay', 'official']);
+const RESERVED = new Set(['p', 'en', 'pricing', 'examples', 'guides', 'plan', 'paid', 'profile', 'links', 'design', 'stats', 'form', 'inbox', 'security', 'preview', 'start', 'more', 'lead', 'qr', 'sitemap', 'app', 'api', 'admin', 'assets', 'go', 'media', 'report', 'rules', 'privacy', 'login', 'logout', 'static', 'www', 'mail', 'help', 'support', 'antviz', 'uzel', 'about', 'terms', 'status', 'blog', 'robots', 'sitemap', 'favicon', 'index', 'dashboard', 'settings', 'me', 'null', 'undefined', 'test', 'root', 'system', 'security', 'billing', 'pay', 'official']);
 
 const CREATE_SQL = `
 CREATE TABLE IF NOT EXISTS uzel_users (

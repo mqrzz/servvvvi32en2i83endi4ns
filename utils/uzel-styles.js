@@ -155,7 +155,7 @@ function renderStyled(page, origin, c) {
   const ints = (ext.interests || []).length ? `<div class="xit g" data-t="${esc(L.interests)}"><h2>${esc(L.interests)} ${sp}</h2><div class="chips">${ext.interests.map((i) => `<span>${esc(i)}</span>`).join('')}</div></div>` : '';
   const ct = c.infoBtns ? `<div class="ct">${c.infoBtns}</div>` : '';
   const lk = c.links ? `<div class="lk">${c.links}</div>` : '';
-  const thanks = esc(ext.thanks || L.thanks);
+  const thanks = ext.thanks ? esc(ext.thanks) : '';
   const loc = ext.location ? `<span class="xloc">${esc(ext.location)}</span>` : '';
   const online = ext.status ? `<span class="xon"><i></i>${esc(ext.status)}</span>` : '';
   const INL = ['neon', 'soft', 'xp'].includes(st);
@@ -170,7 +170,7 @@ function renderStyled(page, origin, c) {
 <title>${esc(page.name)} · Узел</title><meta name="description" content="${c.desc}"><meta name="robots" content="noindex,nofollow">
 <meta property="og:title" content="${esc(page.name)}"><meta property="og:description" content="${c.desc}"><meta property="og:type" content="profile">${c.img}
 <meta name="theme-color" content="${theme}"><link rel="icon" href="${BASE}/assets/favicon.svg" type="image/svg+xml"><style>${STYLE_CSS(BASE)}</style></head>
-<body class="x x-${st}${ext.hello ? ' has-hello' : ''}" style="${style}"><div class="bgl"></div><main class="xw">${(DECOR[st] || []).map((d) => SPK(d[0], d[1], d[2], d[3])).join('')}${header}${music}${soc}${about}${ints}${ct}${lk}${c.form}${st === 'planet' || st === 'chrome' ? `<div class="xsc">${lang === 'en' ? 'scroll' : 'ниже'}${lucideSvg('chevron-right')}</div>` : ''}<p class="xth">${thanks}</p>${st === 'soft' || st === 'editorial' ? '<div class="bar"></div>' : ''}<div class="xft">${c.badge}<a href="${c.report}">${c.reportLabel}</a></div></main>${hasAudio ? `<script>${PLAYER_JS}</script>` : ''}</body></html>`;
+<body class="x x-${st}${ext.hello ? ' has-hello' : ''}" style="${style}"><div class="bgl"></div><main class="xw">${(DECOR[st] || []).map((d) => SPK(d[0], d[1], d[2], d[3])).join('')}${header}${music}${soc}${about}${ints}${ct}${lk}${c.form}${st === 'planet' || st === 'chrome' ? `<div class="xsc">${lang === 'en' ? 'scroll' : 'ниже'}${lucideSvg('chevron-right')}</div>` : ''}${thanks ? `<p class="xth">${thanks}</p>` : ''}${st === 'soft' || st === 'editorial' ? '<div class="bar"></div>' : ''}<div class="xft">${c.badge}<a href="${c.report}">${c.reportLabel}</a></div></main>${hasAudio ? `<script>${PLAYER_JS}</script>` : ''}</body></html>`;
 }
 
 module.exports = { STYLES, BGS, STYLE_BG, PLAYER_HASH, renderStyled };

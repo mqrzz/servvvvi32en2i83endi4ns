@@ -647,13 +647,26 @@ async function creditPayment(paymentId) {
     if (!rec) { await client.query('ROLLBACK'); return { credited: false, status: 'unknown' }; }
     if (rec.status === 'succeeded') { await client.query('ROLLBACK'); return { credited: false, status: 'already' }; }
     const plan = U.PLAN_PRICES[rec.plan_code];
-    if (!plan || Number(pay.amount && pay.amount.value) !== Number(plan.amount)) { await client.query('ROLLBACK'); return { credited: false, status: 'amount' }; }
+    if (!plan || Number(pay.amount && pay.amount.value) !== Number(plan.amount) || (pay.amount && pay.amount.currency) !== 'RUB') { await client.query('ROLLBACK'); return { credited: false, status: 'amount' }; }
     await client.query("UPDATE uzel_payments SET status = 'succeeded', paid_at = now() WHERE id = $1", [paymentId]);
+    const ur = await client.query('SELECT plan, plan_until FROM uzel_users WHERE id = $1 FOR UPDATE', [rec.user_id]);
+    const u = ur.rows[0];
+    const cur = U.planOf(u);
+    const rank = { free: 0, pro: 1, business: 2 };
+    // Правила смены тарифа (без компенсаций):
+    //  бессрочный тариф не трогаем; тот же тариф или гонка с более высоким — срок прибавляем к концу;
+    //  повышение или тариф с нуля — новый срок считается от сегодня, остаток прежнего не переносится.
+    let tier = plan.tier, mode = 'fresh';
+    if (cur !== 'free' && !u.plan_until) { tier = cur; mode = 'keep'; }
+    else if (cur === plan.tier) mode = 'extend';
+    else if (rank[plan.tier] < rank[cur]) { tier = cur; mode = 'extend'; }
     await client.query(
-      `UPDATE uzel_users SET plan = $3,
-         plan_until = GREATEST(COALESCE(plan_until, now()), now()) + ($2::int * interval '1 day') WHERE id = $1`, [rec.user_id, plan.days, plan.tier]);
+      `UPDATE uzel_users SET plan = $2,
+         plan_until = CASE WHEN $3 = 'keep' THEN plan_until
+                           WHEN $3 = 'extend' THEN GREATEST(plan_until, now()) + ($4::int * interval '1 day')
+                           ELSE now() + ($4::int * interval '1 day') END WHERE id = $1`, [rec.user_id, tier, mode, plan.days]);
     await client.query('COMMIT');
-    return { credited: true, status: 'succeeded' };
+    return { credited: true, status: 'succeeded', mode };
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
     throw e;
@@ -667,10 +680,13 @@ router.post('/me/plan/checkout', needUser, limiter(60 * 60 * 1000, 20), async (r
     const code = String((req.body && req.body.plan) || '');
     const plan = U.PLAN_PRICES[code];
     if (!plan) return res.status(400).json({ error: 'Неизвестный тариф' });
+    const rankOf = { free: 0, pro: 1, business: 2 };
+    if (req.uz.user.plan !== 'free' && !req.uz.user.plan_until) return res.status(409).json({ error: 'У вас бессрочный тариф. Чтобы его сменить, напишите на support@antviz.ru.' });
+    if ((rankOf[req.uz.user.plan] || 0) > rankOf[plan.tier]) return res.status(409).json({ error: 'У вас уже включён тариф выше. Он действует, пока не закончится срок.' });
     if (!ykOn()) return res.status(503).json({ error: 'Оплата подключается. Напишите на support@antviz.ru, включим Pro вручную.' });
     const body = {
       amount: { value: plan.amount, currency: 'RUB' }, capture: true, description: plan.title,
-      confirmation: { type: 'redirect', return_url: `${ORIGIN}${U.BASE}/app/plan?paid=1` },
+      confirmation: { type: 'redirect', return_url: `${ORIGIN}${U.BASE}/app/paid` },
       metadata: { uzel_user: String(req.uz.user.id), plan: code },
     };
     const receipt = buildReceipt(req.uz.user.email, plan.title, plan.amount);
@@ -687,11 +703,12 @@ router.post('/me/plan/checkout', needUser, limiter(60 * 60 * 1000, 20), async (r
 // Вызывается, когда человек вернулся после оплаты: проверяем платежи у ЮKassa сами, не дожидаясь уведомления
 router.post('/me/plan/check', needUser, limiter(60 * 1000, 20), async (req, res) => {
   try {
-    if (!ykOn()) return res.json({ ok: true, pending: 0 });
+    if (!ykOn()) return res.json({ ok: true, pending: 0, recent: null });
     const { rows } = await pool.query("SELECT id FROM uzel_payments WHERE user_id = $1 AND status = 'pending' AND created_at > now() - interval '2 days'", [req.uz.user.id]);
     let credited = 0;
     for (const r of rows) { const x = await creditPayment(r.id); if (x.credited) credited++; }
-    res.json({ ok: true, credited, pending: rows.length - credited });
+    const rec = await pool.query("SELECT plan_code FROM uzel_payments WHERE user_id = $1 AND status = 'succeeded' AND paid_at > now() - interval '30 minutes' ORDER BY paid_at DESC LIMIT 1", [req.uz.user.id]);
+    res.json({ ok: true, credited, pending: rows.length - credited, recent: rec.rows[0] ? rec.rows[0].plan_code : null });
   } catch (err) {
     console.error('uzel/plan/check:', err.message);
     res.status(502).json({ error: 'Не удалось проверить оплату' });
