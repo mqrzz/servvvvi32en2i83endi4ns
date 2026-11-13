@@ -1,15 +1,16 @@
-const TIER_PRICES = {
-  'Старт': 2900, 'Рост': 5900, 'Масштаб': 11900,
-  'Простой бот': 4900, 'Бот с оплатой': 9900, 'Mini App': 16900,
-};
-const EXTRA_PRICES = { content: 2000, shop: 4900, bot_pay: 3000, bot_crm: 2500 };
+// Цены пакетов и опций берём из того же набора, что и сайт и калькулятор (site-prices.json).
+// Файл собирается из frontend/assets/js/prices.js: при смене цен на сайте обновите его (см. build.py).
+const SITE = require('./site-prices.json');
+const TIER_PRICES = Object.fromEntries(SITE.types.map((t) => [t.id, t.base]));
+const EXTRA_PRICES = Object.fromEntries(SITE.options.map((o) => [o.id, o.price]));
+const RUSH_RATE = SITE.rush - 1;
 
 const SUPPORT_TARIFFS = {
-  basic:    { price: 500,  limit: 5 },
-  priority: { price: 1200, limit: 20 },
+  basic:    { price: 250,  limit: 5 },
+  priority: { price: 600, limit: 20 },
 };
 const DEFAULT_SUPPORT_TARIFF = 'basic';
-const ONE_OFF_TICKET_PRICE = 350;
+const ONE_OFF_TICKET_PRICE = 175;
 
 async function recalcOrderTotal(client, order) {
   const base = TIER_PRICES[order.package];
@@ -18,7 +19,7 @@ async function recalcOrderTotal(client, order) {
   let running = base;
   const extras = Array.isArray(order.extras) ? order.extras : [];
   for (const key of Object.keys(EXTRA_PRICES)) if (extras.includes(key)) running += EXTRA_PRICES[key];
-  if (extras.includes('urgent')) running += Math.round(running * 0.3);
+  if (extras.includes('urgent')) running += Math.round(running * RUSH_RATE);
 
   let discount = 0;
   if (order.promo_code) {

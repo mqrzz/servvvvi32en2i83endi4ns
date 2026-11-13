@@ -157,6 +157,26 @@ function uzelDigestEmail({ name, views, clicks, leads, top, link, lang }) {
   };
 }
 
+function uzelReceiptEmail({ title, amount, currency, until, paymentId, paidAt, lang, link, provider }) {
+  const ru = lang === 'ru';
+  const cur = currency === 'RUB' ? '₽' : (currency === 'USD' ? '$' : currency === 'EUR' ? '€' : currency || '');
+  const money = currency === 'RUB' ? `${Number(amount).toLocaleString('ru')} ${cur}` : `${cur}${Number(amount).toFixed(2)}`;
+  const fmt = (d) => new Date(d).toLocaleDateString(ru ? 'ru' : 'en', { day: 'numeric', month: 'long', year: 'numeric' });
+  const no = String(paymentId || '').slice(0, 8).toUpperCase();
+  const T = ru
+    ? { subject: `Квитанция об оплате ${title}`, h: 'Оплата получена', lead: 'Спасибо! Ваш тариф уже включён. Это квитанция для вашего архива.', item: 'Услуга', sum: 'Сумма', date: 'Дата оплаты', until: 'Действует до', num: 'Номер платежа', via: 'Способ оплаты', btn: 'Открыть Узел', note: 'Если вы не совершали эту оплату, напишите на support@antviz.ru.' }
+    : { subject: `Receipt for ${title}`, h: 'Payment received', lead: 'Thank you! Your plan is already active. This is your receipt for your records.', item: 'Item', sum: 'Amount', date: 'Paid on', until: 'Active until', num: 'Payment ID', via: 'Paid with', btn: 'Open Uzel', note: 'If you did not make this payment, write to support@antviz.ru.' };
+  const row = (k, v) => `<tr><td style="padding:9px 0;font-size:14px;color:#7b8294;border-bottom:1px solid #eef0f4;">${k}</td><td align="right" style="padding:9px 0;font-size:15px;font-weight:700;color:#0b0b0d;border-bottom:1px solid #eef0f4;">${v}</td></tr>`;
+  const body = `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:4px;">${row(T.item, esc(title))}${row(T.sum, money)}${row(T.date, fmt(paidAt || Date.now()))}${until ? row(T.until, fmt(until)) : ''}${row(T.num, esc(no))}${row(T.via, esc(provider || 'YooKassa'))}</table>`
+    + `<div style="margin-top:22px;">${button(T.btn, link)}</div><p style="margin:18px 0 0;font-size:13px;color:#7b8294;">${T.note}</p>`;
+  return {
+    subject: T.subject,
+    html: emailLayout({ brandName: ru ? 'узел' : 'uzel', logoCid: 'uzel-mark', art: 'uzel-art', heading: T.h, lead: T.lead, bodyHtml: body, footerHtml: uzelFooter(ru ? 'ru' : 'en').replace(/namespace/g, 'a8'), preheader: `${title}: ${money}` }),
+    text: `${T.h}\n${T.item}: ${title}\n${T.sum}: ${money}\n${T.num}: ${no}\n${link}`,
+    attachments: [imageAttachment('uzel-mark.png'), imageAttachment('uzel-art.png')],
+  };
+}
+
 function uzelLeadEmail({ page, name, contact, message, link }) {
   const row = (k, v) => v ? `<tr><td style="padding:10px 0;border-bottom:1px solid #eef1f8;font-size:13px;color:#7b8294;width:96px;vertical-align:top;">${k}</td><td style="padding:10px 0;border-bottom:1px solid #eef1f8;font-size:16px;font-weight:600;color:#0b0b0d;">${esc(v).replace(/\n/g, '<br>')}</td></tr>` : '';
   const body = `<table role="presentation" width="100%" cellpadding="0" cellspacing="0">${row('Имя', name)}${row('Контакт', contact)}${row('Сообщение', message)}</table>
@@ -368,7 +388,9 @@ module.exports = {
   emailLayout,
   uzelCodeEmail,
   uzelLeadEmail,
-  uzelDigestEmail,  imageAttachment,
+  uzelDigestEmail,
+  uzelReceiptEmail,
+  imageAttachment,
   baseAttachments,
   sendCodeEmail,
   sendNewDeviceLoginEmail,

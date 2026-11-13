@@ -6,7 +6,8 @@ const STY = require('./uzel-styles');
 const THEMES = ['light', 'dark', 'blue', 'warm', 'mint', 'sunset', 'graphite', 'lilac'];
 const SHAPES = ['soft', 'round', 'square'];
 const FREE_THEMES = ['light', 'dark', 'blue', 'warm'];
-const LANGS = ['ru', 'en'];
+const I18N = require('./uzel-i18n');
+const LANGS = I18N.LANGS;
 const LIMITS = {
   free: { links: 10, themes: FREE_THEMES, statsDays: 14 },
   pro: { links: 50, themes: THEMES, statsDays: 90 },
@@ -23,7 +24,7 @@ const PAGE_PREFIX = '/p';
 function planOf(u) {
   return u && (u.plan === 'pro' || u.plan === 'business') && (!u.plan_until || new Date(u.plan_until).getTime() > Date.now()) ? u.plan : 'free';
 }
-const RESERVED = new Set(['p', 'en', 'pricing', 'examples', 'guides', 'plan', 'paid', 'profile', 'links', 'design', 'stats', 'form', 'inbox', 'security', 'preview', 'start', 'more', 'lead', 'qr', 'sitemap', 'app', 'api', 'admin', 'assets', 'go', 'media', 'report', 'rules', 'privacy', 'login', 'logout', 'static', 'www', 'mail', 'help', 'support', 'antviz', 'uzel', 'about', 'terms', 'status', 'blog', 'robots', 'sitemap', 'favicon', 'index', 'dashboard', 'settings', 'me', 'null', 'undefined', 'test', 'root', 'system', 'security', 'billing', 'pay', 'official']);
+const RESERVED = new Set(['p', 'en', 'pricing', 'examples', 'guides', 'features', 'templates', 'plan', 'paid', 'profile', 'links', 'design', 'stats', 'form', 'inbox', 'security', 'preview', 'start', 'more', 'lead', 'qr', 'sitemap', 'app', 'api', 'admin', 'assets', 'go', 'media', 'report', 'rules', 'privacy', 'login', 'logout', 'static', 'www', 'mail', 'help', 'support', 'antviz', 'uzel', 'about', 'terms', 'status', 'blog', 'robots', 'sitemap', 'favicon', 'index', 'dashboard', 'settings', 'me', 'null', 'undefined', 'test', 'root', 'system', 'security', 'billing', 'pay', 'official']);
 
 const CREATE_SQL = `
 CREATE TABLE IF NOT EXISTS uzel_users (
@@ -244,7 +245,7 @@ function validatePage(input, existing, plan) {
     else if (!paid && hook !== ((oldExt.form && oldExt.form.webhook) || '')) { errors.push('Вебхук доступен в Pro'); hook = (oldExt.form && oldExt.form.webhook) || ''; }
   }
   const secret = (oldExt.form && oldExt.form.secret) || require('crypto').randomBytes(18).toString('hex');
-  const form = { webhook: hook, secret, enabled: !!fi.enabled, title: cleanText(fi.title, 60) || (lang === 'en' ? 'Leave a request' : 'Оставить заявку'), button: cleanText(fi.button, 30) || (lang === 'en' ? 'Send' : 'Отправить'), notify: fi.notify !== false };
+  const form = { webhook: hook, secret, enabled: !!fi.enabled, title: cleanText(fi.title, 60) || (I18N.pick(lang).ftitle), button: cleanText(fi.button, 30) || (I18N.pick(lang).fbtn), notify: fi.notify !== false };
   const hideBadge = input.hideBadge === undefined ? !!oldExt.hideBadge : !!input.hideBadge;
   if (hideBadge && !paid && !oldExt.hideBadge) errors.push('Скрыть значок можно в Pro');
   const inAcc = input.accent === undefined ? undefined : String(input.accent || '').trim().toLowerCase();
@@ -374,16 +375,13 @@ h1{font:800 clamp(26px,6vw,32px)/1.1 Unbounded,"Golos Text",sans-serif;letter-sp
 h1,.sub,.bio,.lk span{overflow-wrap:anywhere;word-break:break-word;min-width:0}.bio{max-width:100%;white-space:pre-line}
 .lk small{display:block;font-weight:500;font-size:13px;opacity:.7;margin-top:2px;white-space:normal}
 .lk .hd{font:800 13px Unbounded,"Golos Text",sans-serif;letter-spacing:.02em;text-transform:uppercase;opacity:.6;margin:14px 0 -2px;text-align:left}
-.fm{width:100%;display:flex;flex-direction:column;gap:10px;margin-top:22px;text-align:left}.fm input,.fm textarea{width:100%;border:0;border-radius:16px;padding:14px 16px;font:600 16px "Golos Text",system-ui,sans-serif;color:inherit;background:#0b0b0d12;outline:2px solid transparent}.fm textarea{resize:vertical;min-height:84px;max-height:200px}.fm input::placeholder,.fm textarea::placeholder{color:inherit;opacity:.55}.fm input:focus,.fm textarea:focus{outline-color:currentColor}.fm button{height:54px;border:0;border-radius:18px;font:800 16px "Golos Text",system-ui,sans-serif;cursor:pointer;background:#0b0b0d;color:#fff}.t-dark .fm button,.t-graphite .fm button,.t-blue .fm button,.t-sunset .fm button{background:#fff;color:#0b0b0d}.fm .hp{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}
+.fm .cn{display:flex;align-items:flex-start;gap:10px;font:500 13px/1.4 inherit;opacity:.9;cursor:pointer}.fm .cn input{width:18px;height:18px;flex:none;margin:1px 0 0;padding:0;border-radius:5px;accent-color:#0b0b0d}.fm .cn a{color:inherit;text-decoration:underline}.fm{width:100%;display:flex;flex-direction:column;gap:10px;margin-top:22px;text-align:left}.fm input,.fm textarea{width:100%;border:0;border-radius:16px;padding:14px 16px;font:600 16px "Golos Text",system-ui,sans-serif;color:inherit;background:#0b0b0d12;outline:2px solid transparent}.fm textarea{resize:vertical;min-height:84px;max-height:200px}.fm input::placeholder,.fm textarea::placeholder{color:inherit;opacity:.55}.fm input:focus,.fm textarea:focus{outline-color:currentColor}.fm button{height:54px;border:0;border-radius:18px;font:800 16px "Golos Text",system-ui,sans-serif;cursor:pointer;background:#0b0b0d;color:#fff}.t-dark .fm button,.t-graphite .fm button,.t-blue .fm button,.t-sunset .fm button{background:#fff;color:#0b0b0d}.fm .hp{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}
 .t-dark .fm input,.t-dark .fm textarea,.t-blue .fm input,.t-blue .fm textarea,.t-sunset .fm input,.t-sunset .fm textarea,.t-graphite .fm input,.t-graphite .fm textarea{background:#ffffff1f}
 .ac .lk a,.ac .ct a{background:var(--ac)!important;color:var(--act)!important;box-shadow:none!important}.ac .fm button{background:var(--ac)!important;color:var(--act)!important}
 .s-round .lk a{border-radius:999px}.s-square .lk a{border-radius:6px}.s-square .soc a{border-radius:8px}
 `;
 
-const L10N = {
-  ru: { call: 'Позвонить', mail: 'Написать', route: 'Как добраться', made: 'Сделано на Узле', report: 'Пожаловаться', name: 'Ваше имя', contact: 'Телефон или почта', msg: 'Сообщение (необязательно)', pageOf: (n) => `Страница ${n} на Узле` },
-  en: { call: 'Call', mail: 'Email', route: 'Directions', made: 'Made with Uzel', report: 'Report', name: 'Your name', contact: 'Phone or email', msg: 'Message (optional)', pageOf: (n) => `${n} on Uzel` },
-};
+const L10N = I18N.PUB;
 const pageUrl = (origin, slug) => `${origin}${BASE}${PAGE_PREFIX}/${slug}`;
 const linkLive = (l, now) => (!l.from || Date.parse(l.from) <= now) && (!l.to || Date.parse(l.to) > now);
 
@@ -391,6 +389,7 @@ function renderPublicPage(page, origin, opts) {
   opts = opts || {};
   const ext = page.ext || {};
   const L = L10N[ext.lang] || L10N.ru;
+  const dflt = (v, k) => (Object.values(L10N).some((x) => x[k] === v) ? L[k] : v); // стандартные тексты формы переводим вместе со страницей
   const t = THEMES.includes(page.theme) ? page.theme : 'light';
   const plan = opts.plan || 'free';
   const now = Date.now();
@@ -407,7 +406,7 @@ function renderPublicPage(page, origin, opts) {
   const shape = ext.shape || 'soft';
   const music = page.music && page.music.url ? `<a href="${go('music')}" rel="nofollow noopener ugc">${lucideSvg('music')}<span>${esc(page.music.title)}</span>${arrow}</a>` : '';
   const f = ext.form || {};
-  const form = f.enabled ? `<form class="fm" method="post" action="${opts.preview ? '#' : '/api/uzel/lead/' + esc(page.slug)}" ${opts.preview ? 'onsubmit="return false"' : ''}><h2 class="hd" style="margin:0 0 4px">${esc(f.title)}</h2><input name="name" maxlength="60" placeholder="${L.name}" autocomplete="name"><input name="contact" maxlength="120" required placeholder="${L.contact}" autocomplete="tel"><textarea name="message" maxlength="600" rows="3" placeholder="${L.msg}"></textarea><input class="hp" type="text" name="website" tabindex="-1" autocomplete="off" aria-hidden="true"><button type="submit">${esc(f.button)}</button></form>` : '';
+  const form = f.enabled ? `<form class="fm" method="post" action="${opts.preview ? '#' : '/api/uzel/lead/' + esc(page.slug)}" ${opts.preview ? 'onsubmit="return false"' : ''}><h2 class="hd" style="margin:0 0 4px">${esc(dflt(f.title, 'ftitle'))}</h2><input name="name" maxlength="60" placeholder="${L.name}" autocomplete="name"><input name="contact" maxlength="120" required placeholder="${L.contact}" autocomplete="tel"><textarea name="message" maxlength="600" rows="3" placeholder="${L.msg}"></textarea><input class="hp" type="text" name="website" tabindex="-1" autocomplete="off" aria-hidden="true"><label class="cn"><input type="checkbox" name="consent" value="1" required><span>${esc(L.consent)} (<a href="${esc(opts.preview ? '#' : origin + BASE + '/rules')}" target="_blank" rel="noopener">${esc(L.privacy)}</a>)</span></label><button type="submit">${esc(dflt(f.button, 'fbtn'))}</button></form>` : '';
   const desc = esc(page.bio || page.subtitle || L.pageOf(page.name));
   const img = page.avatar ? `<meta property="og:image" content="${esc(origin)}/api/uzel/media/${esc(page.avatar)}">` : '';
   let accentCss = '';
@@ -419,7 +418,7 @@ function renderPublicPage(page, origin, opts) {
   if (STY.STYLES.includes(ext.style) && ext.style !== 'classic') {
     return STY.renderStyled(page, origin, { esc, ext, BASE, lucideSvg, go, opts, soc, links, infoBtns, form, badge, desc, img, accentCss, avatar, gradient: gradient(page.name), report: opts.preview ? '#' : '/api/uzel/report/' + esc(page.slug), reportLabel: L.report });
   }
-  return `<!doctype html><html lang="${ext.lang === 'en' ? 'en' : 'ru'}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  return `<!doctype html><html lang="${L10N[ext.lang] ? ext.lang : 'ru'}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(page.name)} · Узел</title><meta name="description" content="${desc}"><meta name="robots" content="noindex,nofollow">
 <meta property="og:title" content="${esc(page.name)}"><meta property="og:description" content="${desc}"><meta property="og:type" content="profile">${img}
 <meta name="theme-color" content="${({ dark: '#0b0b0d', blue: '#0055e0', warm: '#ffe9d6', mint: '#dff5e8', sunset: '#c2255c', graphite: '#26272b', lilac: '#ece6ff' })[t] || '#f2f2f4'}">
@@ -428,8 +427,9 @@ function renderPublicPage(page, origin, opts) {
 <div class="ft">${badge}<a href="${opts.preview ? '#' : '/api/uzel/report/' + esc(page.slug)}">${L.report}</a></div></main></body></html>`;
 }
 
-function simplePage(title, body, status) {
-  return { status: status || 200, html: `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${esc(title)} · Узел</title><style>${PAGE_CSS}.card{background:#fff;border-radius:28px;padding:30px;box-shadow:0 0 0 1px #0b0b0d1a;text-align:left;width:100%}.card h1{font-size:26px;margin:0 0 12px}.card p{margin:0 0 14px;color:#4a474b}.card select,.card textarea{width:100%;border:0;background:#f2f2f4;border-radius:16px;padding:14px 16px;font:inherit;margin-bottom:12px}.card button,.card .b{display:inline-flex;align-items:center;height:52px;padding:0 24px;border-radius:16px;border:0;background:#06f;color:#fff;font:700 17px inherit;text-decoration:none;cursor:pointer}</style></head><body class="t-light"><main class="w"><div class="card">${body}</div></main></body></html>` };
+function simplePage(title, body, status, lang) {
+  const P = I18N.pick(lang);
+  return { status: status || 200, html: `<!doctype html><html lang="${I18N.PUB[lang] ? lang : 'en'}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${esc(title)} · ${P.brand}</title><style>${PAGE_CSS}.card{background:#fff;border-radius:28px;padding:30px;box-shadow:0 0 0 1px #0b0b0d1a;text-align:left;width:100%}.card h1{font-size:26px;margin:0 0 12px}.card p{margin:0 0 14px;color:#4a474b}.card select,.card textarea{width:100%;border:0;background:#f2f2f4;border-radius:16px;padding:14px 16px;font:inherit;margin-bottom:12px}.card button,.card .b{display:inline-flex;align-items:center;height:52px;padding:0 24px;border-radius:16px;border:0;background:#06f;color:#fff;font-family:inherit;font-weight:700;font-size:17px;text-decoration:none;cursor:pointer}</style></head><body class="t-light"><main class="w"><div class="card">${body}</div></main></body></html>` };
 }
 
-module.exports = { STYLES: STY.STYLES, BGS: STY.BGS, PLAYER_HASH: STY.PLAYER_HASH, LIMITS, FREE_THEMES, LANGS, PLAN_PRICES, PAGE_PREFIX, planOf, pageUrl, SHAPES, BASE, ensureUzelTables, cleanupUzel, THEMES, RESERVED, SOCIALS, cleanText, validateSlug, normalizeUrl, normalizeSocial, validatePage, newId, renderPublicPage, simplePage, esc };
+module.exports = { I18N, STYLES: STY.STYLES, BGS: STY.BGS, PLAYER_HASH: STY.PLAYER_HASH, LIMITS, FREE_THEMES, LANGS, PLAN_PRICES, PAGE_PREFIX, planOf, pageUrl, SHAPES, BASE, ensureUzelTables, cleanupUzel, THEMES, RESERVED, SOCIALS, cleanText, validateSlug, normalizeUrl, normalizeSocial, validatePage, newId, renderPublicPage, simplePage, esc };

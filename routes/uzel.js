@@ -500,26 +500,44 @@ router.get('/media/:file', (req, res) => {
   res.set({ 'Cache-Control': 'public, max-age=31536000, immutable', 'X-Content-Type-Options': 'nosniff', 'Content-Type': f.endsWith('.mp3') ? 'audio/mpeg' : 'image/webp' }).sendFile(p);
 });
 
+async function reportLang(slug, req) {
+  try {
+    if (slug) {
+      const { rows } = await pool.query('SELECT ext FROM uzel_pages WHERE slug = $1', [slug]);
+      const l = rows[0] && rows[0].ext && rows[0].ext.lang;
+      if (l && U.I18N.PUB[l]) return l;
+    }
+  } catch (e) { /* падаем на язык браузера */ }
+  const q = String((req.query && req.query.lang) || '');
+  return U.I18N.PUB[q] ? q : U.I18N.fromHeader(req.headers['accept-language']);
+}
+
 router.get('/report/:slug', async (req, res) => {
   res.set(SEC);
   const v = U.validateSlug(req.params.slug);
   const slug = v.ok ? v.slug : '';
-  const s = U.simplePage('Жалоба', `<h1>Пожаловаться на страницу</h1><p>Страница: <b>${U.esc(slug)}</b></p><form method="post" action="/api/uzel/report"><input type="hidden" name="slug" value="${U.esc(slug)}"><select name="reason"><option>Мошенничество или обман</option><option>Оскорбления или угрозы</option><option>Запрещённый контент</option><option>Чужие персональные данные</option><option>Другое</option></select><textarea name="details" rows="4" maxlength="500" placeholder="Что не так (необязательно)"></textarea><button type="submit">Отправить жалобу</button></form>`);
+  const lang = await reportLang(slug, req);
+  const P = U.I18N.pick(lang);
+  const s = U.simplePage(P.rp_title, `<h1>${U.esc(P.rp_h1)}</h1><p>${U.esc(P.rp_page)}: <b>${U.esc(slug)}</b></p><form method="post" action="/api/uzel/report"><input type="hidden" name="slug" value="${U.esc(slug)}"><input type="hidden" name="lang" value="${U.esc(lang)}"><select name="reason">${P.reasons.map((r, k) => `<option value="${k}">${U.esc(r)}</option>`).join('')}</select><textarea name="details" rows="4" maxlength="500" placeholder="${U.esc(P.rp_ph)}"></textarea><button type="submit">${U.esc(P.rp_send)}</button></form>`, 200, lang);
   res.type('html').send(s.html);
 });
 
-router.post('/report', limiter(60 * 60 * 1000, 8, 'Слишком много жалоб с вашего адреса'), express.urlencoded({ extended: false, limit: '10kb' }), async (req, res) => {
+router.post('/report', limiter(60 * 60 * 1000, 8, 'Too many reports from your address'), express.urlencoded({ extended: false, limit: '10kb' }), async (req, res) => {
   res.set(SEC);
+  const lang0 = U.I18N.PUB[req.body && req.body.lang] ? req.body.lang : 'en';
+  const P = U.I18N.pick(lang0);
   try {
     const v = U.validateSlug(req.body.slug);
     const page = v.ok ? (await pool.query('SELECT id FROM uzel_pages WHERE slug = $1', [v.slug])).rows[0] : null;
     if (page) {
-      await pool.query('INSERT INTO uzel_reports (page_id, reason, details) VALUES ($1,$2,$3)', [page.id, U.cleanText(req.body.reason, 80) || 'Другое', U.cleanText(req.body.details, 500)]);
+      const k = Number(req.body.reason);
+      const reason = Number.isInteger(k) && U.I18N.PUB.en.reasons[k] ? U.I18N.PUB.en.reasons[k] : 'Other';
+      await pool.query('INSERT INTO uzel_reports (page_id, reason, details) VALUES ($1,$2,$3)', [page.id, reason, U.cleanText(req.body.details, 500)]);
     }
-    const s = U.simplePage('Спасибо', '<h1>Жалоба отправлена</h1><p>Мы проверим страницу и примем меры, если правила нарушены.</p>');
+    const s = U.simplePage(P.th_title, `<h1>${U.esc(P.th_h1)}</h1><p>${U.esc(P.th_p)}</p>`, 200, lang0);
     res.type('html').send(s.html);
   } catch (err) {
-    res.status(500).type('text').send('Ошибка сервера');
+    res.status(500).type('text').send(P.err);
   }
 });
 
@@ -555,20 +573,24 @@ router.post('/lead/:slug', limiter(60 * 60 * 1000, 8, 'Слишком много
     const { rows } = v.ok ? await pool.query('SELECT p.*, u.email AS owner_email FROM uzel_pages p JOIN uzel_users u ON u.id = p.user_id WHERE p.slug = $1 AND p.published AND NOT p.hidden', [v.slug]) : { rows: [] };
     const page = rows[0];
     const form = page && page.ext && page.ext.form;
-    const en = page && page.ext && page.ext.lang === 'en';
+    const P = U.I18N.pick((page && page.ext && page.ext.lang) || 'ru'); const PL = (page && page.ext && page.ext.lang) || 'ru';
+    if (page && String((req.body && req.body.consent) || '') !== '1') {
+      const s0 = U.simplePage(P.ls_check, `<h1>${U.esc(P.ls_consent)}</h1><a class="b" href="javascript:history.back()">${U.esc(P.ls_backbtn)}</a>`, 400, PL);
+      return res.status(s0.status).type('html').send(s0.html);
+    }
     if (!page || !form || !form.enabled) return res.status(404).type('text').send('Not found');
     if (String(req.body.website || '').trim()) { // ловушка для ботов: делаем вид, что всё хорошо
-      const s = U.simplePage(en ? 'Thanks' : 'Спасибо', `<h1>${en ? 'Sent' : 'Заявка отправлена'}</h1>`);
+      const s = U.simplePage(P.ls_thanks, `<h1>${U.esc(P.ls_ok)}</h1>`, 200, PL);
       return res.type('html').send(s.html);
     }
     const contact = U.cleanText(req.body.contact, 120);
     if (contact.length < 5) {
-      const s = U.simplePage(en ? 'Check form' : 'Проверьте форму', `<h1>${en ? 'Add a phone or email' : 'Укажите телефон или почту'}</h1><p>${en ? 'So the owner can reply.' : 'Иначе владелец не сможет с вами связаться.'}</p><a class="b" href="javascript:history.back()">${en ? 'Back' : 'Назад'}</a>`, 400);
+      const s = U.simplePage(P.ls_check, `<h1>${U.esc(P.ls_add)}</h1><p>${U.esc(P.ls_so)}</p><a class="b" href="javascript:history.back()">${U.esc(P.ls_backbtn)}</a>`, 400, PL);
       return res.status(400).type('html').send(s.html);
     }
     const day = await pool.query("SELECT count(*)::int AS n FROM uzel_leads WHERE page_id = $1 AND created_at > now() - interval '1 day'", [page.id]);
     if (day.rows[0].n >= 40) {
-      const s = U.simplePage(en ? 'Try later' : 'Попробуйте позже', `<h1>${en ? 'Too many requests today' : 'Сегодня заявок уже слишком много'}</h1>`, 429);
+      const s = U.simplePage(P.ls_later, `<h1>${U.esc(P.ls_many)}</h1>`, 429, PL);
       return res.status(429).type('html').send(s.html);
     }
     const name = U.cleanText(req.body.name, 60), message = U.cleanText(req.body.message, 600);
@@ -587,11 +609,11 @@ router.post('/lead/:slug', limiter(60 * 60 * 1000, 8, 'Слишком много
         transporter.sendMail({ from: process.env.MAIL_FROM, to: page.owner_email, subject: mail.subject, html: mail.html, text: mail.text, attachments: mail.attachments }).catch((e) => console.error('uzel/lead mail:', e.message));
       } catch (e) { console.error('uzel/lead mail:', e.message); }
     }
-    const s = U.simplePage(en ? 'Thanks' : 'Спасибо', `<h1>${en ? 'Request sent' : 'Заявка отправлена'}</h1><p>${en ? 'The owner will get back to you soon.' : 'Владелец страницы скоро свяжется с вами.'}</p><a class="b" href="${U.pageUrl(ORIGIN, page.slug)}">${en ? 'Back to the page' : 'Вернуться на страницу'}</a>`);
+    const s = U.simplePage(P.ls_thanks, `<h1>${U.esc(P.ls_sent)}</h1><p>${U.esc(P.ls_p)}</p><a class="b" href="${U.pageUrl(ORIGIN, page.slug)}">${U.esc(P.ls_back)}</a>`, 200, PL);
     res.type('html').send(s.html);
   } catch (err) {
     console.error('uzel/lead:', err);
-    res.status(500).type('text').send('Ошибка сервера');
+    res.status(500).type('text').send('Server error');
   }
 });
 
@@ -636,8 +658,19 @@ async function ykRequest(method, path, body, idem) {
   return j;
 }
 
+
+// Квитанция на почту после успешной оплаты (не блокирует и не ломает зачисление тарифа)
+async function sendReceipt(rec, plan, pay) {
+  const u = (await pool.query('SELECT u.email, u.plan_until, p.ext FROM uzel_users u LEFT JOIN uzel_pages p ON p.user_id = u.id WHERE u.id = $1', [rec.user_id])).rows[0];
+  if (!u || !u.email) return;
+  const lang = (u.ext && u.ext.lang) === 'ru' ? 'ru' : 'en';
+  const mail = mailer.uzelReceiptEmail({ title: plan.title, amount: plan.amount, currency: (pay.amount && pay.amount.currency) || 'RUB', until: u.plan_until, paymentId: rec.id, paidAt: pay.captured_at || Date.now(), lang, link: `${ORIGIN}${U.BASE}/app/`, provider: 'YooKassa' });
+  await mailer.transporter.sendMail({ from: process.env.MAIL_FROM, to: u.email, subject: mail.subject, html: mail.html, text: mail.text, attachments: mail.attachments });
+}
+
 async function creditPayment(paymentId) {
   const pay = await ykRequest('GET', `/payments/${encodeURIComponent(paymentId)}`);
+  if (pay.status === 'canceled') { await pool.query("UPDATE uzel_payments SET status = 'canceled' WHERE id = $1 AND status = 'pending'", [paymentId]); return { credited: false, status: 'canceled' }; }
   if (pay.status !== 'succeeded' || !pay.paid) return { credited: false, status: pay.status };
   const client = await pool.connect();
   try {
@@ -666,6 +699,7 @@ async function creditPayment(paymentId) {
                            WHEN $3 = 'extend' THEN GREATEST(plan_until, now()) + ($4::int * interval '1 day')
                            ELSE now() + ($4::int * interval '1 day') END WHERE id = $1`, [rec.user_id, tier, mode, plan.days]);
     await client.query('COMMIT');
+    sendReceipt(rec, plan, pay).catch((e) => console.error('uzel/receipt:', e.message));
     return { credited: true, status: 'succeeded', mode };
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
@@ -703,12 +737,14 @@ router.post('/me/plan/checkout', needUser, limiter(60 * 60 * 1000, 20), async (r
 // Вызывается, когда человек вернулся после оплаты: проверяем платежи у ЮKassa сами, не дожидаясь уведомления
 router.post('/me/plan/check', needUser, limiter(60 * 1000, 20), async (req, res) => {
   try {
-    if (!ykOn()) return res.json({ ok: true, pending: 0, recent: null });
+    if (!ykOn()) return res.json({ ok: true, credited: 0, latest: null });
     const { rows } = await pool.query("SELECT id FROM uzel_payments WHERE user_id = $1 AND status = 'pending' AND created_at > now() - interval '2 days'", [req.uz.user.id]);
     let credited = 0;
     for (const r of rows) { const x = await creditPayment(r.id); if (x.credited) credited++; }
-    const rec = await pool.query("SELECT plan_code FROM uzel_payments WHERE user_id = $1 AND status = 'succeeded' AND paid_at > now() - interval '30 minutes' ORDER BY paid_at DESC LIMIT 1", [req.uz.user.id]);
-    res.json({ ok: true, credited, pending: rows.length - credited, recent: rec.rows[0] ? rec.rows[0].plan_code : null });
+    // Результат смотрим по самому свежему платежу (за 3 часа), а не по всем: брошенные попытки не должны держать страницу в ожидании
+    const last = await pool.query("SELECT status, plan_code FROM uzel_payments WHERE user_id = $1 AND created_at > now() - interval '3 hours' ORDER BY created_at DESC LIMIT 1", [req.uz.user.id]);
+    const latest = last.rows[0] ? { status: last.rows[0].status, plan: last.rows[0].plan_code } : null;
+    res.json({ ok: true, credited, latest });
   } catch (err) {
     console.error('uzel/plan/check:', err.message);
     res.status(502).json({ error: 'Не удалось проверить оплату' });
